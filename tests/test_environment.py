@@ -1,11 +1,12 @@
 """Tests for the base Environment class."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec
 from datasets import Dataset
 from verifiers import Environment
 from verifiers import Parser
 from verifiers import Rubric
+from transformers import PreTrainedTokenizerBase
 
 
 # Create a concrete implementation for testing the abstract base class
@@ -188,8 +189,8 @@ class TestEnvironmentBase:
             rubric=Rubric()
         )
         
-        # Create a mock tokenizer
-        mock_tokenizer = Mock()
+        # Create a mock tokenizer that passes isinstance check
+        mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
         mock_tokenizer.apply_chat_template = Mock(side_effect=lambda messages, tokenize=False, add_generation_prompt=True: 
             "User: What is 2+2?Assistant:" if add_generation_prompt else "User: What is 2+2?Assistant: 4")
         mock_tokenizer.encode = Mock(side_effect=lambda text: list(range(len(text.split()))))
@@ -197,8 +198,8 @@ class TestEnvironmentBase:
         prompt = [{"role": "user", "content": "What is 2+2?"}]
         completion = [{"role": "assistant", "content": "4"}]
         
-        prompt_ids, prompt_mask, completion_ids, completion_mask = env.process_chat_format(
-            prompt, completion, mock_tokenizer, mask_env_responses=False
+        prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs = env.process_chat_format(
+            prompt, None, completion, mock_tokenizer, mask_env_responses=False
         )
         
         assert isinstance(prompt_ids, list)
@@ -209,6 +210,7 @@ class TestEnvironmentBase:
         assert len(completion_ids) == len(completion_mask)
         assert all(m == 0 for m in prompt_mask)  # Prompt mask should be all 0s
         assert all(m == 1 for m in completion_mask)  # Completion mask should be all 1s
+        assert remaining_inputs is not None  # Check for remaining_inputs
 
     def test_process_completion_format(self, mock_openai_client, sample_dataset):
         """Test processing completion format text."""
@@ -250,8 +252,8 @@ class TestEnvironmentBase:
             rubric=Rubric()
         )
         
-        # Create a mock tokenizer
-        mock_tokenizer = Mock()
+        # Create a mock tokenizer that passes isinstance check
+        mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
         
         # Track the conversation state
         def mock_apply_chat_template(conversation, tokenize=False, add_generation_prompt=True):
@@ -282,7 +284,7 @@ class TestEnvironmentBase:
         rewards = [1.0]
         
         results = env.process_env_results(
-            prompts, completions, states, rewards, mock_tokenizer
+            prompts, None, completions, states, rewards, mock_tokenizer
         )
         
         assert "prompt_ids" in results
@@ -291,6 +293,7 @@ class TestEnvironmentBase:
         assert "completion_mask" in results
         assert "completion_logprobs" in results
         assert "rewards" in results
+        assert "remaining_inputs" in results
         assert len(results["rewards"]) == 1
         assert results["rewards"][0] == 1.0
 
@@ -304,8 +307,8 @@ class TestEnvironmentBase:
             rubric=Rubric()
         )
         
-        # Create a mock tokenizer
-        mock_tokenizer = Mock()
+        # Create a mock tokenizer that passes isinstance check
+        mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
         
         # Track the conversation state
         def mock_apply_chat_template(conversation, tokenize=False, add_generation_prompt=True):
@@ -336,7 +339,7 @@ class TestEnvironmentBase:
         rewards = [1.0]
         
         results = env.process_env_results(
-            prompts, completions, states, rewards, mock_tokenizer,
+            prompts, None, completions, states, rewards, mock_tokenizer,
             max_seq_len=8,  # Force truncation
             mask_truncated_completions=True
         )

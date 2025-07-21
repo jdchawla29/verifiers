@@ -94,6 +94,10 @@ class MockAsyncOpenAI:
         if text_response:
             self.default_text_response = text_response
     
+    def set_response(self, response):
+        """Convenience method to set default chat response."""
+        self.default_chat_response = response
+    
     async def _handle_chat_completion(self, messages, **kwargs):
         """Handle chat completion requests."""
         key = self._messages_to_key(messages)
@@ -167,6 +171,17 @@ class MockAsyncOpenAI:
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
+            
+            # Handle multimodal content (list of content items)
+            if isinstance(content, list):
+                content_str = ""
+                for item in content:
+                    if item.get("type") == "text":
+                        content_str += item.get("text", "")
+                    elif item.get("type") == "image_url":
+                        content_str += "[IMAGE]"
+                content = content_str
+            
             key_parts.append(f"{role}:{content}")
         return tuple(key_parts)
 
@@ -183,6 +198,25 @@ def sample_dataset():
     return Dataset.from_dict({
         "question": ["What is 2+2?", "What is the capital of France?"],
         "answer": ["4", "Paris"]
+    })
+
+
+@pytest.fixture
+def sample_multimodal_dataset():
+    """Return a sample multimodal dataset for testing."""
+    from PIL import Image
+    
+    # Create small test images
+    img1 = Image.new('RGB', (10, 10), color='red')
+    img2 = Image.new('RGB', (10, 10), color='blue')
+    
+    return Dataset.from_dict({
+        "prompt": [
+            [{"role": "user", "content": "What color is this image?"}],
+            [{"role": "user", "content": "Describe this image"}]
+        ],
+        "images": [[img1], [img2]],
+        "answer": [["red"], ["blue square"]]
     })
 
 

@@ -1,12 +1,15 @@
 import asyncio
+import base64
+import io
 import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from typing import TYPE_CHECKING, List, Literal, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
+from PIL import Image
 
 from verifiers import (
     ChatCompletion,
@@ -29,6 +32,51 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
+def _pil_to_data_url(img: Image.Image, fmt: str | None = None) -> str:
+    """Convert PIL Image to data URL for multimodal inputs."""
+    buf = io.BytesIO()
+    fmt = (fmt or img.format or "PNG").upper()
+    img.save(buf, format=fmt)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/{fmt.lower()};base64,{b64}"
+
+
+def format_oai_chat_msg(
+    prompts: List[List[Dict[str, Any]]],
+    images: List[List[Image.Image]]
+) -> List[Any]:
+    """Format multimodal chat messages for OpenAI API."""
+    formatted_conversations = []
+
+    for conv_prompts, conv_images in zip(prompts, images):
+        img_iter = iter(conv_images)
+        new_conv = []
+
+        for msg in conv_prompts:
+            role = msg["role"]
+            content = msg["content"]
+
+            if isinstance(content, list):
+                new_parts = []
+                for part in content:
+                    if part.get("type") == "image":
+                        img = next(img_iter)
+                        data_url = _pil_to_data_url(img)
+                        new_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": data_url}
+                        })
+                    else:
+                        new_parts.append(part.copy())
+                new_conv.append({"role": role, "content": new_parts})
+            else:
+                new_conv.append({"role": role, "content": content})
+
+        formatted_conversations.append(new_conv)
+
+    return formatted_conversations
+
+
 class Environment(ABC):
     """
     Base class for all environments.
@@ -47,6 +95,7 @@ class Environment(ABC):
         sampling_args: SamplingArgs = {},
         message_type: MessageType = "chat",
         max_workers: int = 512,
+        data_collator: Callable | None = None,
         **kwargs,
     ):
         self.client = client
@@ -54,6 +103,7 @@ class Environment(ABC):
         self.message_type: Literal["chat", "completion"] = message_type
         self.system_prompt = system_prompt
         self.few_shot = few_shot
+        self.data_collator = data_collator
 
         if self.message_type == "chat":
             if dataset is not None:
@@ -77,6 +127,16 @@ class Environment(ABC):
                 )
             self.dataset = dataset
             self.eval_dataset = eval_dataset
+
+        # Apply data collator if provided
+        if self.data_collator is not None and self.eval_dataset is not None:
+            processed_dataset = self.data_collator(list(self.eval_dataset))
+            if not processed_dataset:
+                self.eval_dataset = {}
+            else:
+                keys = processed_dataset[0].keys()
+                self.eval_dataset = {key: [sample.get(key) for sample in processed_dataset] for key in keys}
+
         self.parser = parser
         self.rubric = rubric
         self.sampling_args = {
@@ -160,16 +220,20 @@ class Environment(ABC):
 
     def get_eval_dataset(
         self, n: int = -1, seed: int | None = None, **kwargs
-    ) -> Dataset | None:
+    ) -> Dataset | dict[Any, list[Any]] | None:
         if self.eval_dataset is None:
             self.logger.warning(
                 "eval_dataset is not set, falling back to train dataset"
             )
             return self.get_dataset(n, seed, **kwargs)
-        if seed is not None:
-            self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
-        if n > 0:
-            return self.eval_dataset.select(range(n))
+        if isinstance(self.eval_dataset, Dataset):
+            if seed is not None:
+                self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
+            if n > 0:
+                return self.eval_dataset.select(range(n))
+        elif isinstance(self.eval_dataset, dict) and n > 0:
+            # Handle dict format for data collator output
+            return {key: value_list[:n] for key, value_list in self.eval_dataset.items()}
         return self.eval_dataset
 
     def get_reward_funcs(self, **kwargs) -> List[RewardFunc]:
@@ -333,8 +397,14 @@ class Environment(ABC):
         if "info" not in results:
             results["info"] = [{}] * len(results["prompt"])
 
+        # Handle multimodal inputs
+        if results.get("images") is not None:
+            prompts = format_oai_chat_msg(results["prompt"], results["images"])
+        else:
+            prompts = results["prompt"]
+
         rollouts = await self.run_rollouts(
-            prompts=results["prompt"],
+            prompts=prompts,
             answers=results["answer"],
             tasks=results["task"],
             infos=results["info"],
@@ -407,10 +477,11 @@ class Environment(ABC):
     def process_chat_format(
         self,
         prompt: List[ChatMessage],
+        images: Optional[List[List[Any]]],
         completion: List[ChatMessage],
-        processing_class: "PreTrainedTokenizerBase",
+        processing_class: Any,
         mask_env_responses: bool = False,
-    ) -> Tuple[List[int], List[int], List[int], List[int]]:
+    ) -> Tuple[List[int], List[int], List[int], List[int], dict[str, Any]]:
         """
         Process chat format conversations using incremental prefixes.
 
@@ -420,72 +491,121 @@ class Environment(ABC):
         3. Apply masking for intermediate responses if needed
 
         Returns:
-            prompt_ids, prompt_mask, completion_ids, completion_mask
+            prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs
         """
-        # tokenize just the prompt
-        prompt_text = processing_class.apply_chat_template(
-            prompt,  # type: ignore
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        assert isinstance(prompt_text, str)
-        prompt_ids = processing_class.encode(prompt_text)
-        prompt_mask = [0] * len(prompt_ids)
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-        # track completion tokens and masks by processing incrementally
         completion_ids = []
         completion_mask = []
+        remaining_inputs = {}
 
-        # previous tokenization (starts with just prompt)
-        prev_ids = prompt_ids
+        if images:
+            # Handle multimodal case with processor
+            assert not isinstance(processing_class, PreTrainedTokenizerBase)
+            prompt_text = processing_class.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            assert isinstance(prompt_text, str)
+            inputs = processing_class(text=prompt_text, images=images, return_tensors="pt")
+            remaining_inputs = {
+                k: v
+                for k, v in inputs.items()
+                if k not in ["input_ids", "attention_mask"]
+            }
+            prev_ids = inputs.input_ids[0].tolist()
+            prompt_ids = prev_ids
+            prompt_mask = [0] * len(prompt_ids)
 
-        # process each completion message incrementally
-        for i, msg in enumerate(completion):
-            # create conversation prefix: prompt + completion[:i+1]
-            conversation_prefix = prompt + completion[: i + 1]
+            for i, msg in enumerate(completion):
+                conversation_prefix = prompt + completion[:i+1]
+                prefix_text = processing_class.apply_chat_template(
+                    conversation_prefix, 
+                    tokenize=False, 
+                    add_generation_prompt=False,
+                )
+                assert isinstance(prefix_text, str), f"Expected string from apply_chat_template, got {type(prefix_text)}"
+                current_ids = processing_class(text=prefix_text, images=images, return_tensors="pt").input_ids[0].tolist()
+                assert current_ids[:len(prev_ids)-1] == prev_ids[:-1], (
+                    f"Tokenization difference in chat format. Current ids: {current_ids[:len(prev_ids)-1]}, previous ids: {prev_ids[:-1]}"
+                )
+                new_tokens = current_ids[len(prev_ids):]
+                assert len(new_tokens) > 0, f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
+                completion_ids.extend(new_tokens)
 
-            # tokenize the full prefix
-            prefix_text = processing_class.apply_chat_template(
-                conversation_prefix,  # type: ignore
+                if msg["role"] == "assistant":
+                    msg_mask = [1] * len(new_tokens)
+                elif msg["role"] != "assistant" and mask_env_responses:
+                    msg_mask = [0] * len(new_tokens)
+                else:
+                    msg_mask = [1] * len(new_tokens)
+                
+                completion_mask.extend(msg_mask)
+                prev_ids = current_ids
+        else:
+            # Handle text-only case with tokenizer
+            assert isinstance(processing_class, PreTrainedTokenizerBase)
+            # tokenize just the prompt
+            prompt_text = processing_class.apply_chat_template(
+                prompt,  # type: ignore
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=True,
             )
-            assert isinstance(prefix_text, str)
-            current_ids = processing_class.encode(prefix_text)
-            assert current_ids[: len(prev_ids) - 1] == prev_ids[:-1], (
-                f"Tokenization difference in chat format. Current ids: {current_ids[: len(prev_ids) - 1]}, previous ids: {prev_ids[:-1]}"
-            )
+            assert isinstance(prompt_text, str)
+            prompt_ids = processing_class.encode(prompt_text)
+            prompt_mask = [0] * len(prompt_ids)
+            
+            # track completion tokens and masks by processing incrementally
+            completion_ids = []
+            completion_mask = []
+            
+            # previous tokenization (starts with just prompt)
+            prev_ids = prompt_ids
+            
+            # process each completion message incrementally
+            for i, msg in enumerate(completion):
+                # create conversation prefix: prompt + completion[:i+1]
+                conversation_prefix = prompt + completion[:i+1]
+                
+                # tokenize the full prefix
+                prefix_text = processing_class.apply_chat_template(
+                    conversation_prefix,  # type: ignore
+                    tokenize=False, 
+                    add_generation_prompt=False,
+                )
+                assert isinstance(prefix_text, str), f"Expected string from apply_chat_template, got {type(prefix_text)}"
+                current_ids = processing_class.encode(prefix_text)
+                assert current_ids[:len(prev_ids)-1] == prev_ids[:-1], (
+                    f"Tokenization difference in chat format. Current ids: {current_ids[:len(prev_ids)-1]}, previous ids: {prev_ids[:-1]}"
+                )
+                
+                # add new tokens to completion tokens
+                new_tokens = current_ids[len(prev_ids):] 
+                assert len(new_tokens) > 0, (
+                    f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
+                )
+                completion_ids.extend(new_tokens)
 
-            # add new tokens to completion tokens
-            new_tokens = current_ids[len(prev_ids) :]
-            assert len(new_tokens) > 0, (
-                f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
-            )
-            completion_ids.extend(new_tokens)
-
-            # create mask
-            if msg["role"] == "assistant":
-                msg_mask = [1] * len(new_tokens)
-            elif msg["role"] != "assistant" and mask_env_responses:
-                # mask intermediate 'user' and/or 'tool' messages
-                msg_mask = [0] * len(new_tokens)
-            else:
-                # default to not masking
-                msg_mask = [1] * len(new_tokens)
-
-            completion_mask.extend(msg_mask)
-            # update previous tokenization for next iteration
-            prev_ids = current_ids
-            assert len(completion_ids) == len(completion_mask), (
-                f"Length mismatch in chat format. \
+                # create mask
+                if msg["role"] == "assistant":
+                    msg_mask = [1] * len(new_tokens)
+                elif msg["role"] != "assistant" and mask_env_responses:
+                    # mask intermediate 'user' and/or 'tool' messages 
+                    msg_mask = [0] * len(new_tokens)
+                else:
+                    # default to not masking
+                    msg_mask = [1] * len(new_tokens)
+                
+                completion_mask.extend(msg_mask)
+                # update previous tokenization for next iteration
+                prev_ids = current_ids
+                assert len(completion_ids) == len(completion_mask), (
+                    f"Length mismatch in chat format. \
 Completion ids: {completion_ids}, completion mask: {completion_mask}. \
 This often occurs with models whose tokenizer chat templates discard <think> tokens \
 from previous turns, such as Qwen3 or DeepSeek-R1-Distill models. \
 For Qwen3 models, you may want to replace the chat template with the Qwen2.5 chat template. \
 Model copies with swapped templates are available here: https://huggingface.co/collections/willcb/qwen3-68434f4883925bfdb4570ee5"
-            )
+                )
 
-        return prompt_ids, prompt_mask, completion_ids, completion_mask
+        return prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs
 
     def process_completion_format(
         self, prompt: str, completion: str, processing_class: "PreTrainedTokenizerBase"
@@ -514,10 +634,11 @@ Model copies with swapped templates are available here: https://huggingface.co/c
     def process_env_results(
         self,
         prompts: List[Messages],
+        images: Optional[List[List[Any]]],
         completions: List[Messages],
         states: List[State],
         rewards: List[float],
-        processing_class: "PreTrainedTokenizerBase",
+        processing_class: Any,
         max_seq_len: int = -1,
         mask_env_responses: bool = False,
         mask_truncated_completions: bool = False,
@@ -527,7 +648,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         Main tokenization pipeline that handles both chat and completion formats.
 
         Returns:
-            Dict with prompt_ids, prompt_mask, completion_ids, completion_mask, rewards
+            Dict with prompt_ids, prompt_mask, completion_ids, completion_mask, rewards, remaining_inputs
         """
         # Determine format from first prompt
         is_chat_format = isinstance(prompts[0], list)
@@ -538,26 +659,35 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         all_completion_masks = []
         all_completion_logprobs = []
         all_rewards = []
-        for i, (prompt, completion, state, reward) in enumerate(
-            zip(prompts, completions, states, rewards)
+        all_remaining_inputs = []
+
+        input_images = images or [None] * len(prompts)
+
+        for i, (prompt, img, completion, state, reward) in enumerate(
+            zip(prompts, input_images, completions, states, rewards)
         ):
             # Format-specific processing
             if is_chat_format:
                 assert isinstance(prompt, list) and isinstance(completion, list)
-                prompt_ids, prompt_mask, completion_ids, completion_mask = (
+                prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs = (
                     self.process_chat_format(
-                        prompt, completion, processing_class, mask_env_responses
+                        prompt, img, completion, processing_class, mask_env_responses
                     )
                 )
             else:
+                if img is not None:
+                    raise NotImplementedError("Multi-modal training is not supported with completion formats yet")
                 assert isinstance(prompt, str) and isinstance(completion, str)
                 prompt_ids, prompt_mask, completion_ids, completion_mask = (
                     self.process_completion_format(prompt, completion, processing_class)
                 )
+                remaining_inputs = {}
+
             is_truncated = False
             if max_seq_len > 0 and len(prompt_ids) + len(completion_ids) > max_seq_len:
                 if len(prompt_ids) > max_seq_len:
                     prompt_ids = prompt_ids[:max_seq_len]
+                    prompt_mask = prompt_mask[:max_seq_len]
                 completion_ids = completion_ids[: max_seq_len - len(prompt_ids)]
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
                 is_truncated = True
@@ -577,10 +707,12 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             all_completion_ids.append(completion_ids)
             all_completion_masks.append(completion_mask)
             all_completion_logprobs.append([0.0] * len(completion_ids))
+            all_remaining_inputs.append(remaining_inputs)
             if zero_truncated_completions and is_truncated:
                 all_rewards.append(0.0)
             else:
                 all_rewards.append(reward)
+
         return {
             "prompt_ids": all_prompt_ids,
             "prompt_mask": all_prompt_masks,
@@ -588,6 +720,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             "completion_mask": all_completion_masks,
             "completion_logprobs": all_completion_logprobs,
             "rewards": all_rewards,
+            "remaining_inputs": all_remaining_inputs,
         }
 
     def parse_chat_completion_logprobs(
@@ -747,12 +880,15 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                 prompt_ids, prompt_mask, completion_ids, completion_mask = (
                     self.process_completion_format(prompt, completion, processing_class)
                 )
+                completion_logprobs = [0.0] * len(completion_ids)
             is_truncated = False
             if max_seq_len > 0 and len(prompt_ids) + len(completion_ids) > max_seq_len:
                 if len(prompt_ids) > max_seq_len:
                     prompt_ids = prompt_ids[:max_seq_len]
+                    prompt_mask = prompt_mask[:max_seq_len]
                 completion_ids = completion_ids[: max_seq_len - len(prompt_ids)]
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
+                completion_logprobs = completion_logprobs[: max_seq_len - len(prompt_ids)]
                 is_truncated = True
                 assert len(prompt_ids) + len(completion_ids) <= max_seq_len, (
                     f"Prompt length: {len(prompt_ids)}, completion length: {len(completion_ids)}, max_seq_len: {max_seq_len}"
@@ -765,14 +901,13 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             assert len(completion_ids) == len(completion_mask), (
                 f"Completion ids: {len(completion_ids)}, completion mask: {len(completion_mask)}"
             )
-            completion_logprobs = [0] * len(completion_ids)
             all_prompt_ids.append(prompt_ids)
             all_prompt_masks.append(prompt_mask)
             all_completion_ids.append(completion_ids)
             all_completion_masks.append(completion_mask)
             all_completion_logprobs.append(completion_logprobs)
-            if zero_truncated_completions:
-                all_rewards.append(0)
+            if zero_truncated_completions and is_truncated:
+                all_rewards.append(0.0)
             else:
                 all_rewards.append(reward)
         return {
@@ -807,7 +942,12 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             inputs = self.get_eval_dataset(n=num_examples)
         assert inputs is not None, "No dataset found"
         if rollouts_per_example > 1:
-            inputs = inputs.repeat(rollouts_per_example)
+            if isinstance(inputs, Dataset):
+                inputs = inputs.repeat(rollouts_per_example)
+            elif isinstance(inputs, dict):
+                # Handle dict format
+                inputs = {key: value_list * rollouts_per_example for key, value_list in inputs.items()}
+
         results = self.generate(
             inputs,
             client,

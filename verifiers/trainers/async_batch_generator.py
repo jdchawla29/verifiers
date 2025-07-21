@@ -15,7 +15,7 @@ class BatchRequest:
     """Request for batch generation"""
 
     batch_id: int
-    env_inputs: Dict[str, List[Any]]
+    env_inputs: Dict[str, List[Any] | None]
     processing_class: Any
     mask_env_responses: bool
     max_seq_len: int
@@ -283,8 +283,9 @@ class AsyncBatchGenerator:
             all_reward_dict[key] = env_results[key]
 
         # Process results
-        processed_results = self.env.process_env_results_vllm(
+        processed_results = self.env.process_env_results(
             env_results["prompt"],
+            env_results.get("images"),  # May be None for text-only tasks
             env_results["completion"],
             env_results["state"],
             env_results["reward"],

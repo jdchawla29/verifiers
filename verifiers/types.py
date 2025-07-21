@@ -34,3 +34,4 @@ class ProcessedOutputs(TypedDict):
     completion_mask: List[int]
     completion_logprobs: List[float]
     rewards: List[float]
+    remaining_inputs: Optional[List[Dict[str, Any]]]

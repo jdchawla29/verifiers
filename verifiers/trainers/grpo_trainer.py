@@ -1392,7 +1392,13 @@ class GRPOTrainer(Trainer):
                         last_message = messages[-1]
                         content = last_message.get("content", "")
                         if isinstance(content, list):
-                            content = content[0]["text"] # extract text only in multimodal case
+                            # Extract text from multimodal content
+                            text_content = ""
+                            for item in content:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    text_content = item.get("text", "")
+                                    break
+                            content = text_content
                         prompt.append([{'role': 'user', 'content': content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
@@ -1452,7 +1458,13 @@ class GRPOTrainer(Trainer):
                         last_message = messages[-1]
                         content = last_message.get("content", "")
                         if isinstance(content, list):
-                            content = content[0]["text"] # extract text only in multimodal case
+                            # Extract text from multimodal content
+                            text_content = ""
+                            for item in content:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    text_content = item.get("text", "")
+                                    break
+                            content = text_content
                         prompt.append([{'role': 'user', 'content': content}])
                 table = {
                     "step": [str(self.state.global_step)] * len(self._textual_logs["prompt"]),

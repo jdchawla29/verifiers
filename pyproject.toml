@@ -24,6 +24,11 @@ classifiers = [
 dependencies = [
     "openai",
     "datasets",
+    "flashinfer-python>=0.2.7.post1",
+    "qwen-vl-utils>=0.0.11",
+    "torch>=2.7.0",
+    "flash-attn>=2.8.1",
+    "bitsandbytes>=0.46.1",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +43,6 @@ all = [
     "myst-parser",
     "sphinx-rtd-theme",
     "requests",
-    "torch>=2.7.0",
     "transformers",
     "accelerate>=1.4.0",
     "deepspeed",
@@ -57,7 +61,7 @@ all = [
     "reasoning-gym",
     "smolagents>=1.15.0",
     "textarena",
-    "nltk"
+    "nltk",
 ]
 
 dev = [

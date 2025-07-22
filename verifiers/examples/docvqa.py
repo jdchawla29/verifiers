@@ -1,9 +1,8 @@
 from datasets import load_dataset
 import verifiers as vf
-from openai import AsyncOpenAI
+from openai import OpenAI, AsyncOpenAI
 import os
 import logging
-import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -89,7 +88,7 @@ Respond in the following format:
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Custom judge prompt for that returns a score
-judge_prompt_score = """You are an expert judge evaluating answers.
+judge_prompt = """You are an expert judge evaluating answers.
 
 Question:
 ```
@@ -116,259 +115,220 @@ Score the predicted answer on a scale of 0-1:
 Respond with ONLY a number between 0 and 1, nothing else."""
 
 # Initialize OpenAI client for judge
-from openai import OpenAI
-
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is required for judge evaluation")
 
 judge_client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("Using OpenAI judge for evaluation")
 
-# Create JudgeRubric with numeric scoring  
-judge_rubric = vf.JudgeRubric(
+# Custom JudgeRubric that returns numeric scores
+class NumericJudgeRubric(vf.JudgeRubric):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add the scoring function to the rubric
+        self.add_reward_func(self.numeric_judge_score)
+    
+    def numeric_judge_score(self, completion, answer, state, **kwargs):
+        """Scoring function that calls judge and converts to float."""
+        # Call the parent judge method
+        prompt = kwargs.get("prompt", "")
+        judge_response = self.judge(
+            prompt,
+            completion,
+            answer,
+            state
+        )
+        
+        try:
+            # Extract numeric score
+            score = float(judge_response.strip())
+            logger.info(f"Parsed score: {score}")
+            return score
+        except ValueError:
+            logger.error(f"Could not parse judge response as float: {judge_response}")
+            # Fallback to binary scoring
+            if "yes" in judge_response.lower() or "1" in judge_response:
+                return 1.0
+            else:
+                return 0.0
+
+# Create the numeric judge rubric
+judge_rubric = NumericJudgeRubric(
     parser=parser,
     judge_client=judge_client,
     judge_model="gpt-4.1-nano",
-    judge_prompt=judge_prompt_score,
+    judge_prompt=judge_prompt,
     judge_sampling_args={"temperature": 0.0, "max_tokens": 10}
 )
 
-def docvqa_judge_score(completion, **kwargs):
-    # Get the judge's response using the judge method
-    state = {}
-    prompt = kwargs.get("prompt", "")
-    answer = kwargs.get("answer", [])
-    
-    # Format answer for judge
-    if isinstance(answer, list):
-        answer_str = ", ".join(answer)
-    else:
-        answer_str = str(answer)
-    
-    logger.info(f"Ground truth answers: {answer_str}")
-    
-    # Try to extract the model's answer
-    try:
-        parsed_answer = parser.parse_answer(completion)
-        logger.info(f"Parser extracted answer: '{parsed_answer}'")
-    except Exception as e:
-        logger.error(f"Parser failed: {e}")
-        parsed_answer = None
-    
-    # If parser failed, try manual extraction
-    if not parsed_answer:
-        logger.warning("Parser returned empty answer, trying manual extraction")
-        for msg in completion:
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                # Try to extract answer from XML tags (handle missing closing tag)
-                # First try with closing tag
-                match = re.search(r"<answer>(.*?)</answer>", content, re.DOTALL)
-                if not match:
-                    # Try without closing tag
-                    match = re.search(r"<answer>(.*)$", content, re.DOTALL | re.MULTILINE)
-                if match:
-                    parsed_answer = match.group(1).strip()
-                    logger.info(f"Manually extracted answer from XML: '{parsed_answer}'")
-                else:
-                    # No XML format at all - try to extract the actual answer
-                    logger.warning("No XML format found, attempting smart extraction")
-                    
-                    # Remove any <think> content first
-                    content_no_think = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-                    content_no_think = content_no_think.strip()
-                    
-                    # Common patterns for answers without XML
-                    patterns = [
-                        r"(?:The answer is|Answer:|A:)\s*(.+?)(?:\.|$)",  # "The answer is X" or "Answer: X"
-                        r"(?:It is|It's|They are|These are)\s*(.+?)(?:\.|$)",  # "It is X" or "They are X"
-                        r"^([^.!?]+)(?:[.!?]|$)",  # First sentence if nothing else matches
-                    ]
-                    
-                    for pattern in patterns:
-                        match = re.search(pattern, content_no_think, re.IGNORECASE | re.MULTILINE)
-                        if match:
-                            parsed_answer = match.group(1).strip()
-                            logger.info(f"Smart extraction found: '{parsed_answer}'")
-                            break
-                    
-                    # Last resort - if content is short and no patterns match, use the whole thing
-                    if not parsed_answer and content_no_think and len(content_no_think) < 100:
-                        parsed_answer = content_no_think
-                        logger.info(f"Using entire response as answer: '{parsed_answer}'")
-                break
-    
-    # Check if we have an answer to judge
-    if not parsed_answer:
-        logger.error("No answer found to judge")
-        return 0.0
-    
-    # Call the judge method with the parsed answer
-    # Update the judge prompt to use the parsed answer
-    judge_prompt = judge_prompt_score.format(
-        question=prompt[-1]["content"][0]["text"] if isinstance(prompt, list) else prompt,
-        answer=answer_str,
-        response=parsed_answer
-    )
-    
-    logger.debug(f"Judge prompt: {judge_prompt[:200]}...")
-    
-    judge_response = judge_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": judge_prompt}],
-        temperature=0.0,
-        max_tokens=10
-    )
-    
-    judge_result = judge_response.choices[0].message.content.strip() # type: ignore
-    logger.info(f"Judge response: {judge_result}")
-    
-    try:
-        # Extract numeric score
-        score = float(judge_result)
-        logger.info(f"Parsed score: {score}")
-        return score
-    except ValueError:
-        logger.error(f"Could not parse judge response as float: {judge_result}")
-        # Fallback to binary scoring
-        if "yes" in judge_result.lower() or "1" in judge_result:
-            return 1.0
-        else:
-            return 0.0
-
 # Combine format checking and judge scoring
-rubric = vf.Rubric(
-    funcs=[
-        parser.get_format_reward_func(),
-        docvqa_judge_score,
-    ]
-)
+rubric = vf.RubricGroup(rubrics=[
+    vf.Rubric(funcs=[parser.get_format_reward_func()]),
+    judge_rubric
+])
 
-# Create environment for training or evaluation
+# Configuration flags
+MODE = "eval"  # "train" or "eval"
+API_TYPE = "openai"  # "openai" or "vllm" (only used when MODE="eval")
+
+client = None  # Will be initialized based on API_TYPE
+
+# Model and client configuration
+if MODE == "eval":
+    if API_TYPE == "vllm":
+        # vLLM API configuration
+        client = AsyncOpenAI(
+            base_url="http://localhost:8000/v1"
+        )
+        models = client.models.list()
+        if not models:
+            raise ValueError("No models found in vLLM server. Make sure the server is running and models are loaded.")
+        MODEL_NAME = models[0].id  # type: ignore
+        logger.info(f"Using vLLM model: {MODEL_NAME}")
+    else:
+        MODEL_NAME = "gpt-4.1-mini"
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+else:
+    # Training uses local model
+    MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+# Evaluation settings
+EVAL_NUM_EXAMPLES = 10
+EVAL_ROLLOUTS_PER_EXAMPLE = 1
+
+# Training settings
+TRAIN_MAX_STEPS = 100
+TRAIN_EVAL_STEPS = 10
+TRAIN_BATCH_SIZE = 4
+TRAIN_GRADIENT_ACCUMULATION_STEPS = 2
+TRAIN_NUM_GENERATIONS = 4
+
+# Select appropriate data collator
+data_collator = api_data_collator if MODE == "eval" else qwen_data_collator
+
+# Create environment
 vf_env = vf.SingleTurnEnv(
     dataset=dataset,
     eval_dataset=eval_dataset,
     system_prompt=system_prompt,
     parser=parser,
     rubric=rubric,
-    data_collator=qwen_data_collator,
-    rollouts_per_sample=4,  # Must match num_generations
+    data_collator=data_collator,
+    rollouts_per_sample=TRAIN_NUM_GENERATIONS if MODE == "train" else EVAL_ROLLOUTS_PER_EXAMPLE,
 )
 
-# Evaluation example using API models
-# api_key = 'token-abc123' # vllm
-# client = AsyncOpenAI(api_key=api_key, base_url="http://localhost:8000/v1")
-
-# model = "Qwen/Qwen2.5-VL-7B-Instruct"
-
-# # Sampling parameters
-# sampling_args = {
-#     "temperature": 0.0, 
-#     "max_tokens": 500,
-# }
-
-# # Run evaluation
-# print(f"\nEvaluating {model} on DocVQA...")
-# results = vf_env.evaluate(
-#     client=client,
-#     model=model,
-#     sampling_args=sampling_args,
-#     num_examples=10,  # Evaluate on 10 examples
-#     rollouts_per_example=1,
-# )
-
-# # Analyze results
-# print("\nEvaluation Results:")
-# print("-" * 50)
-
-# # Extract scores
-# format_scores = results.get("format_reward_func", [])
-# correctness_scores = results.get("docvqa_judge_score", [])
-# total_rewards = results.get("reward", [])
-
-# # Calculate statistics
-# def calculate_stats(scores):
-#     if not scores:
-#         return {"mean": 0, "min": 0, "max": 0}
-#     return {
-#         "mean": sum(scores) / len(scores),
-#         "min": min(scores),
-#         "max": max(scores),
-#     }
-
-# format_stats = calculate_stats(format_scores)
-# correctness_stats = calculate_stats(correctness_scores)
-# total_stats = calculate_stats(total_rewards)
-
-# print(f"Format Score - Mean: {format_stats['mean']:.3f}, Min: {format_stats['min']:.3f}, Max: {format_stats['max']:.3f}")
-# print(f"Correctness Score - Mean: {correctness_stats['mean']:.3f}, Min: {correctness_stats['min']:.3f}, Max: {correctness_stats['max']:.3f}")
-# print(f"Total Reward - Mean: {total_stats['mean']:.3f}, Min: {total_stats['min']:.3f}, Max: {total_stats['max']:.3f}")
-
-# # Show some example completions
-# print("\nExample Completions:")
-# print("-" * 50)
-
-# for i in range(len(results["completion"])):
-#     print(f"\nExample {i+1}:")
+if MODE == "eval":
+    logger.info(f"Running evaluation with {API_TYPE.upper()} API model: {MODEL_NAME}")
     
-#     # Extract question from prompt
-#     prompt = results['prompt'][i]
-#     if isinstance(prompt, list) and len(prompt) > 0:
-#         # Find the user message with the question
-#         for msg in prompt:
-#             if msg.get('role') == 'user':
-#                 content = msg.get('content', [])
-#                 for item in content:
-#                     if item.get('type') == 'text':
-#                         print(f"Question: {item.get('text', '')}")
-#                         break
-#                 break
+    sampling_args = {
+        "temperature": 0.0,
+        "max_tokens": 500,
+    }
+    results = vf_env.evaluate(
+        client=client,  # type: ignore
+        model=MODEL_NAME,
+        sampling_args=sampling_args,
+        num_examples=EVAL_NUM_EXAMPLES,
+        rollouts_per_example=EVAL_ROLLOUTS_PER_EXAMPLE,
+    )
     
-#     # Extract ground truth
-#     answer = results['answer'][i]
-#     print(f"Ground Truth: {answer}")
+    # Analyze results
+    logger.info("\nEvaluation Results:")
+    logger.info("-" * 50)
     
-#     # Extract assistant response
-#     completion = results['completion'][i]
-#     assistant_msg = next((msg for msg in completion if msg['role'] == 'assistant'), None)
-#     if assistant_msg:
-#         print(f"Model Response: {assistant_msg['content']}")
+    # Extract scores
+    format_scores = results.get("format_reward_func", [])
+    correctness_scores = results.get("numeric_judge_score", [])
+    total_rewards = results.get("reward", [])
     
-#     print(f"Correctness Score: {correctness_scores[i]:.3f}")
-#     print(f"Total Reward: {total_rewards[i]:.3f}")
+    # Calculate statistics
+    def calculate_stats(scores):
+        if not scores:
+            return {"mean": 0, "min": 0, "max": 0}
+        return {
+            "mean": sum(scores) / len(scores),
+            "min": min(scores),
+            "max": max(scores),
+        }
+    
+    format_stats = calculate_stats(format_scores)
+    correctness_stats = calculate_stats(correctness_scores)
+    total_stats = calculate_stats(total_rewards)
+    
+    logger.info(f"Format Score - Mean: {format_stats['mean']:.3f}, Min: {format_stats['min']:.3f}, Max: {format_stats['max']:.3f}")
+    logger.info(f"Correctness Score - Mean: {correctness_stats['mean']:.3f}, Min: {correctness_stats['min']:.3f}, Max: {correctness_stats['max']:.3f}")
+    logger.info(f"Total Reward - Mean: {total_stats['mean']:.3f}, Min: {total_stats['min']:.3f}, Max: {total_stats['max']:.3f}")
+    
+    # Show some example completions
+    logger.info("\nExample Completions:")
+    logger.info("-" * 50)
+    
+    for i in range(min(3, len(results["completion"]))):  # Show first 3 examples
+        logger.info(f"\nExample {i+1}:")
+        
+        # Extract question from prompt
+        prompt = results['prompt'][i]
+        if isinstance(prompt, list) and len(prompt) > 0:
+            for msg in prompt:
+                if msg.get('role') == 'user':
+                    content = msg.get('content', [])
+                    for item in content:
+                        if item.get('type') == 'text':
+                            logger.info(f"Question: {item.get('text', '')}")
+                            break
+                    break
+        
+        # Extract ground truth
+        answer = results['answer'][i]
+        logger.info(f"Ground Truth: {answer}")
+        
+        # Extract assistant response
+        completion = results['completion'][i]
+        assistant_msg = next((msg for msg in completion if msg['role'] == 'assistant'), None)
+        if assistant_msg:
+            logger.info(f"Model Response: {assistant_msg['content'][:200]}...")  # Truncate long responses
+        
+        if i < len(correctness_scores):
+            logger.info(f"Correctness Score: {correctness_scores[i]:.3f}")
+        if i < len(total_rewards):
+            logger.info(f"Total Reward: {total_rewards[i]:.3f}")
 
-
-model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
-model, processor = vf.get_model_and_tokenizer(model_name)
-run_name = "docvqa_" + model_name.split("/")[-1].lower()
-
-training_args = vf.grpo_defaults(run_name=run_name)
-training_args.learning_rate = 3e-6
-training_args.max_steps = 100  # Limit steps for testing
-training_args.eval_strategy = "steps"
-training_args.eval_steps = 10  # Evaluate every 10 steps
-training_args.gradient_checkpointing_kwargs = {
-    "use_reentrant": False,
-}
-
-# GRPO specific settings
-training_args.num_generations = 4  # Number of generations per prompt
-training_args.per_device_train_batch_size = 4  # Increased from 2
-training_args.gradient_accumulation_steps = 2  # Effective batch size = 8
-
-# Memory optimization settings
-training_args.fp16 = True  # Use mixed precision training
-training_args.optim = "adamw_8bit"  # Use 8-bit optimizer
-training_args.gradient_checkpointing = True  # Enable gradient checkpointing
-
-# Generation settings for memory
-training_args.temperature = 0.7
-training_args.max_new_tokens = 200  # Limit generation length
-
-trainer = vf.GRPOTrainer(
-    model=model,
-    processing_class=processor,
-    env=vf_env,
-    args=training_args,
-)
-trainer.train()
+elif MODE == "train":
+    logger.info(f"Running training with local model: {MODEL_NAME}")
+    
+    model, processor = vf.get_model_and_tokenizer(MODEL_NAME)
+    run_name = "docvqa_" + MODEL_NAME.split("/")[-1].lower()
+    
+    training_args = vf.grpo_defaults(run_name=run_name)
+    training_args.learning_rate = 3e-6
+    training_args.max_steps = TRAIN_MAX_STEPS
+    training_args.eval_strategy = "steps"
+    training_args.eval_steps = TRAIN_EVAL_STEPS
+    training_args.gradient_checkpointing_kwargs = {
+        "use_reentrant": False,
+    }
+    
+    # GRPO specific settings
+    training_args.num_generations = TRAIN_NUM_GENERATIONS
+    training_args.per_device_train_batch_size = TRAIN_BATCH_SIZE
+    training_args.gradient_accumulation_steps = TRAIN_GRADIENT_ACCUMULATION_STEPS
+    
+    # Memory optimization settings
+    training_args.fp16 = True
+    training_args.optim = "adamw_8bit"
+    training_args.gradient_checkpointing = True
+    
+    # Generation settings for memory
+    training_args.temperature = 0.7
+    training_args.max_new_tokens = 200
+    
+    trainer = vf.GRPOTrainer(
+        model=model,
+        processing_class=processor,
+        env=vf_env,
+        args=training_args,
+    )
+    trainer.train()
+    
+else:
+    raise ValueError(f"Invalid MODE: {MODE}. Must be 'train' or 'eval'")

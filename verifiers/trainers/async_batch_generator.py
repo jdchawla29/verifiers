@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import queue
 import threading
 import time
@@ -8,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from verifiers import GenerateOutputs
+from verifiers.utils.logger import get_logger, log_generation_batch, Timer
 
 
 @dataclass
@@ -82,7 +82,7 @@ class AsyncBatchGenerator:
         # Thread management
         self.worker_thread = None
         self.stop_event = threading.Event()
-        self.logger = logging.getLogger(f"AsyncBatchGenerator-{id(self)}")
+        self.logger = get_logger("verifiers.trainers.async_batch_generator")
         self.is_generating = False  # Track if currently generating
         self.worker_loop = None  # Will be set in worker thread
         self.started = False  # Track if generator is started
@@ -237,6 +237,12 @@ class AsyncBatchGenerator:
                         break
 
                     # Generate batch using the async method
+                    self.logger.info_structured(
+                        f"Starting generation for batch {request.batch_id}",
+                        batch_id=request.batch_id,
+                        num_prompts=len(request.env_inputs['prompt'])
+                    )
+                    
                     start_time = time.time()
                     result = loop.run_until_complete(
                         self._generate_batch_async(request)
@@ -244,6 +250,19 @@ class AsyncBatchGenerator:
                     generation_time = time.time() - start_time
                     result.generation_time = generation_time
                     self.generation_times.append(generation_time)
+                    
+                    # Log batch completion with statistics
+                    log_generation_batch(
+                        self.logger,
+                        batch_id=request.batch_id,
+                        prompts=result.prompts,
+                        completions=result.completions,
+                        rewards=result.all_reward_dict,
+                        generation_time=generation_time,
+                        queue_depth=self.request_queue.qsize(),
+                        pending_batches=len(self.pending_batches)
+                    )
+                    
                     self.result_queue.put(result)
                 except queue.Empty:
                     continue

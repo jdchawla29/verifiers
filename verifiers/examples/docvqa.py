@@ -5,9 +5,17 @@ import os
 import logging
 import re
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Set up logging with reduced clutter
+from verifiers.utils.logger import setup_logging, get_logger
+
+setup_logging(level="INFO", use_rich=False)
+
+# Suppress verbose httpx and openai logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("qwen_vl_utils").setLevel(logging.WARNING)
+
+logger = get_logger(__name__)
 
 """
 DocVQA evaluation example for both API and local models.

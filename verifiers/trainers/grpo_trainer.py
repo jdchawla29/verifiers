@@ -1,7 +1,7 @@
 # adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py
 
 import inspect
-import logging
+# Remove direct logging import - will use get_logger instead
 import time
 from collections import defaultdict, deque
 from contextlib import nullcontext
@@ -29,7 +29,7 @@ from verifiers import Environment
 from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchRequest
 from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
-from verifiers.utils.logging_utils import print_prompt_completions_sample
+from verifiers.utils.logger import get_logger, print_prompt_completions_sample, Timer
 from verifiers.utils.model_utils import generic_model_loader
 
 class RepeatSampler(Sampler):
@@ -197,7 +197,8 @@ def split_data_dict(
     # Ensure chunk_size is an integer
     chunk_size = len(first_item) // num_chunks
     if len(first_item) % num_chunks != 0:
-        logging.warning(
+        logger = get_logger(__name__)
+        logger.warning(
             f"The total number of samples ({len(first_item)}) is not divisible by the number of chunks ({num_chunks}). "
             f"The last {len(first_item) % num_chunks} samples will be dropped."
         )
@@ -259,7 +260,7 @@ class GRPOTrainer(Trainer):
         peft_config: Optional[PeftConfig] = None,
         **kwargs,
     ):
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
 
         # Models
         if peft_config is not None:
@@ -754,7 +755,7 @@ class GRPOTrainer(Trainer):
         # All processes wait if generation is happening
         while is_generating:
             time.sleep(0.5)
-            self.logger.info(
+            self.logger.debug(
                 "Waiting for background batch generation to complete before weight syncing."
             )
 
@@ -772,33 +773,34 @@ class GRPOTrainer(Trainer):
         )
 
         # ALL processes must participate in model operations for DeepSpeed ZeRO-3
-        if is_peft_model(self.model):
-            # With PEFT and DeepSpeed ZeRO Stage 3, we must gather the full model at once before merging
-            with gather_if_zero3(list(self.model.parameters())):  # type: ignore
-                self.model.merge_adapter()  # type: ignore
+        with Timer(self.logger, "weight_sync_to_vllm"):
+            if is_peft_model(self.model):
+                # With PEFT and DeepSpeed ZeRO Stage 3, we must gather the full model at once before merging
+                with gather_if_zero3(list(self.model.parameters())):  # type: ignore
+                    self.model.merge_adapter()  # type: ignore
 
-                # Update vLLM weights while parameters are gathered
+                    # Update vLLM weights while parameters are gathered
+                    for name, param in self.model.named_parameters():  # type: ignore
+                        # When using PEFT, we need to recover the original parameter name and discard some parameters
+                        name = name.removeprefix("base_model.model.").replace(
+                            ".base_layer", ""
+                        )
+                        if self.model.prefix in name:  # type: ignore
+                            continue
+                        # When module to save, remove its prefix and discard the original module
+                        if "original_module" in name:
+                            continue
+                        name = name.replace("modules_to_save.default.", "")
+
+                        if self.accelerator.is_main_process:
+                            self.vllm_client.update_named_param(name, param.data)
+                    self.model.unmerge_adapter()  # type: ignore
+            else:
+                # For non-PEFT models, gather and update each parameter individually
                 for name, param in self.model.named_parameters():  # type: ignore
-                    # When using PEFT, we need to recover the original parameter name and discard some parameters
-                    name = name.removeprefix("base_model.model.").replace(
-                        ".base_layer", ""
-                    )
-                    if self.model.prefix in name:  # type: ignore
-                        continue
-                    # When module to save, remove its prefix and discard the original module
-                    if "original_module" in name:
-                        continue
-                    name = name.replace("modules_to_save.default.", "")
-
-                    if self.accelerator.is_main_process:
-                        self.vllm_client.update_named_param(name, param.data)
-                self.model.unmerge_adapter()  # type: ignore
-        else:
-            # For non-PEFT models, gather and update each parameter individually
-            for name, param in self.model.named_parameters():  # type: ignore
-                with gather_if_zero3([param]):
-                    if self.accelerator.is_main_process:
-                        self.vllm_client.update_named_param(name, param.data)
+                    with gather_if_zero3([param]):
+                        if self.accelerator.is_main_process:
+                            self.vllm_client.update_named_param(name, param.data)
 
         # Reset cache on vLLM (main process only)
         if self.accelerator.is_main_process:
@@ -808,7 +810,7 @@ class GRPOTrainer(Trainer):
         if self.accelerator.is_main_process:
             while self.vllm_client.get_num_background_tasks() > 0:
                 time.sleep(0.5)
-                self.logger.info(
+                self.logger.debug(
                     "Waiting for weight syncing background tasks to complete before submitting new batches."
                 )
 
@@ -1187,10 +1189,11 @@ class GRPOTrainer(Trainer):
         if remaining_inputs and remaining_inputs[0]:
             model_kwargs = {key: [d[key] for d in remaining_inputs] for key in remaining_inputs[0].keys()}
         
-        per_token_logps = self._get_per_token_logps(
-            model, input_ids, attention_mask, logits_to_keep, 
-            batch_size=1 if model_kwargs else None, **model_kwargs
-        )
+        with Timer(self.logger, "compute_per_token_logps"):
+            per_token_logps = self._get_per_token_logps(
+                model, input_ids, attention_mask, logits_to_keep, 
+                batch_size=1 if model_kwargs else None, **model_kwargs
+            )
         # Compute the loss
         advantages = inputs["advantages"]
         # When using num_iterations == 1, old_per_token_logps == per_token_logps,

@@ -365,10 +365,24 @@ training_args.gradient_checkpointing = True  # Enable gradient checkpointing
 training_args.temperature = 0.7
 training_args.max_new_tokens = 200  # Limit generation length
 
+# Import dashboard callback
+from verifiers.visualization.grpo_web_dashboard import create_grpo_web_dashboard
+
+# Create dashboard callback
+dashboard_callback = create_grpo_web_dashboard(port=5000)
+logger.info("Created GRPO web dashboard callback on port 5000")
+
 trainer = vf.GRPOTrainer(
     model=model,
     processing_class=processor,
     env=vf_env,
     args=training_args,
+    callbacks=[dashboard_callback],
 )
+
+logger.info("\n" + "="*60)
+logger.info("Starting DocVQA training with dashboard...")
+logger.info("Dashboard available at: http://localhost:5000")
+logger.info("="*60 + "\n")
+
 trainer.train()

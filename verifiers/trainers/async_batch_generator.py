@@ -58,6 +58,7 @@ class AsyncBatchGenerator:
         num_batches_ahead: int = 1,
         max_queue_size: Optional[int] = None,
         generation_timeout: float = 300.0,  # 5 minutes default
+        pipeline_tracker: Optional[Any] = None,  # Optional tracker for dashboard
     ):
         self.env = env
         self.client_config = client_config
@@ -67,6 +68,7 @@ class AsyncBatchGenerator:
         self.num_batches_ahead = num_batches_ahead
         self.max_queue_size = max_queue_size or max(num_batches_ahead * 2, 4)
         self.generation_timeout = generation_timeout
+        self.pipeline_tracker = pipeline_tracker  # Store tracker reference
 
         # Queues for communication
         self.request_queue = queue.Queue()
@@ -89,6 +91,9 @@ class AsyncBatchGenerator:
 
         # Synchronization
         self._lock = threading.Lock()
+        
+        # Batch ID mapping for tracker
+        self._batch_id_map = {}
 
     def start(self):
         """Start the async generation worker thread"""
@@ -135,6 +140,19 @@ class AsyncBatchGenerator:
             self.pending_batches.add(request.batch_id)
 
         self.request_queue.put(request)
+        
+        # Notify tracker that batch was queued
+        if self.pipeline_tracker:
+            # Get number of samples from the inputs
+            # Try 'prompt' first (used by GRPO), then 'text' as fallback
+            prompts = request.env_inputs.get('prompt', request.env_inputs.get('text', []))
+            num_samples = len(prompts) if prompts else 0
+            # Assume 1 generation per prompt for now
+            batch_info_id = self.pipeline_tracker.create_batch(num_samples, 1)
+            # Map our batch_id to tracker's batch_id (thread-safe)
+            with self._lock:
+                self._batch_id_map[request.batch_id] = batch_info_id
+        
         return True
 
     def get_batch(self, batch_id: int, timeout: Optional[float] = None) -> BatchResult:
@@ -182,6 +200,11 @@ class AsyncBatchGenerator:
                     f"Batch {batch_id} generation timed out after {timeout}s"
                 )
 
+    def get_tracker_batch_id(self, batch_id: int) -> Optional[int]:
+        """Get the tracker's batch ID for a given batch ID."""
+        with self._lock:
+            return self._batch_id_map.get(batch_id)
+    
     def get_pending_count(self) -> int:
         """Get number of batches currently being generated"""
         with self._lock:
@@ -262,8 +285,16 @@ class AsyncBatchGenerator:
         """
         Generate a single batch asynchronously.
         """
+        # Notify tracker that generation is starting
+        if self.pipeline_tracker:
+            with self._lock:
+                tracker_batch_id = self._batch_id_map.get(request.batch_id)
+            if tracker_batch_id is not None:
+                self.pipeline_tracker.start_generation(tracker_batch_id)
+        
         # Call environment generation
         self.is_generating = True
+        generation_start_time = time.time()
         env_results = await self.env.a_generate(
             request.env_inputs,
             client=self.client,
@@ -272,8 +303,111 @@ class AsyncBatchGenerator:
             score_rollouts=True,
             max_concurrent=request.max_concurrent,
         )
+        generation_end_time = time.time()
         self.is_generating = False
+        
+        # Notify tracker that generation is complete
+        if self.pipeline_tracker:
+            with self._lock:
+                tracker_batch_id = self._batch_id_map.get(request.batch_id)
+            if tracker_batch_id is not None:
+                prompts = env_results["prompt"]
+                completions = env_results["completion"]
+                
+                # Extract readable prompts for display
+                display_prompts = []
+                for prompt in prompts:
+                    if isinstance(prompt, list):
+                        # Handle message format prompts (like DocVQA)
+                        for msg in prompt:
+                            if msg.get('role') == 'user':
+                                content = msg.get('content', [])
+                                if isinstance(content, list):
+                                    # Extract text from content blocks
+                                    for item in content:
+                                        if isinstance(item, dict) and item.get('type') == 'text':
+                                            display_prompts.append(item.get('text', ''))
+                                            break
+                                elif isinstance(content, str):
+                                    display_prompts.append(content)
+                                break
+                    elif isinstance(prompt, str):
+                        display_prompts.append(prompt)
+                    else:
+                        display_prompts.append(str(prompt))
+                
+                # If no prompts extracted, use placeholders
+                if not display_prompts:
+                    display_prompts = [f"Prompt {i+1}" for i in range(len(prompts))]
+                
+                # Extract readable completions for display
+                display_completions = []
+                
+                # Check if we have unique prompts or if they're repeated
+                unique_prompts = []
+                seen = set()
+                for i, p in enumerate(display_prompts):
+                    if p not in seen:
+                        unique_prompts.append((i, p))
+                        seen.add(p)
+                
+                # If prompts are repeated (one per generation), group completions accordingly
+                if len(unique_prompts) < len(display_prompts):
+                    # Prompts are repeated - group completions by unique prompt
+                    num_unique = len(unique_prompts)
+                    num_generations = len(display_prompts) // num_unique if num_unique > 0 else 1
+                    
+                    for i, (orig_idx, prompt) in enumerate(unique_prompts):
+                        prompt_completions = []
+                        for j in range(num_generations):
+                            idx = i * num_generations + j
+                            if idx < len(completions):
+                                completion = completions[idx]
+                                if isinstance(completion, list):
+                                    # Handle message format completions
+                                    for msg in completion:
+                                        if msg.get('role') == 'assistant':
+                                            prompt_completions.append(msg.get('content', ''))
+                                            break
+                                    else:
+                                        prompt_completions.append('')
+                                elif isinstance(completion, str):
+                                    prompt_completions.append(completion)
+                                else:
+                                    prompt_completions.append(str(completion))
+                        display_completions.append(prompt_completions)
+                    
+                    # Update display_prompts to only show unique ones
+                    display_prompts = [p for _, p in unique_prompts]
+                else:
+                    # Each prompt is unique - assume one completion per prompt
+                    for completion in completions:
+                        if isinstance(completion, list):
+                            # Handle message format completions
+                            comp_text = ''
+                            for msg in completion:
+                                if msg.get('role') == 'assistant':
+                                    comp_text = msg.get('content', '')
+                                    break
+                            display_completions.append([comp_text])
+                        elif isinstance(completion, str):
+                            display_completions.append([completion])
+                        else:
+                            display_completions.append([str(completion)])
+                
+                # Pass generation timing info
+                self.pipeline_tracker.complete_generation_with_timing(
+                    tracker_batch_id, display_prompts, display_completions,
+                    generation_start_time, generation_end_time
+                )
 
+        # Notify tracker that scoring is starting
+        if self.pipeline_tracker:
+            with self._lock:
+                tracker_batch_id = self._batch_id_map.get(request.batch_id)
+            if tracker_batch_id is not None:
+                self.pipeline_tracker.start_scoring(tracker_batch_id)
+        
         # Extract all reward-related keys
         all_reward_dict = {}
         reward_keys = [
@@ -295,6 +429,25 @@ class AsyncBatchGenerator:
             mask_truncated_completions=request.mask_truncated_completions,
             zero_truncated_completions=request.zero_truncated_completions,
         )
+        
+        # Notify tracker that scoring is complete
+        if self.pipeline_tracker:
+            with self._lock:
+                tracker_batch_id = self._batch_id_map.get(request.batch_id)
+            if tracker_batch_id is not None:
+                rewards = env_results["reward"]
+                # Calculate advantages if available
+                advantages = processed_results.get("advantages", [0] * len(rewards))
+                # Get all scores from reward dict
+                scores = []
+                for i in range(len(rewards)):
+                    example_scores = []
+                    for key in reward_keys:
+                        if key in all_reward_dict and i < len(all_reward_dict[key]):
+                            example_scores.append(all_reward_dict[key][i])
+                    scores.append(example_scores)
+                
+                self.pipeline_tracker.complete_scoring(tracker_batch_id, rewards, advantages, scores)
 
         return BatchResult(
             batch_id=request.batch_id,

@@ -550,6 +550,15 @@ class GRPOTrainer(Trainer):
         self._async_started = False
         self.num_batches_ahead = args.num_batches_ahead
 
+        # Check if we have a dashboard callback with a tracker
+        pipeline_tracker = None
+        if callbacks:
+            for callback in callbacks:
+                if hasattr(callback, 'pipeline_tracker'):
+                    pipeline_tracker = callback.pipeline_tracker
+                    self.logger.info("Found dashboard callback, will track batch pipeline")
+                    break
+
         # num_batches_ahead=0 will behave synchronously (submit and wait immediately)
         self.async_generator = AsyncBatchGenerator(
             env=self.env,
@@ -559,6 +568,7 @@ class GRPOTrainer(Trainer):
             num_batches_ahead=self.num_batches_ahead,
             max_queue_size=args.async_max_queue_size,
             generation_timeout=args.async_generation_timeout,
+            pipeline_tracker=pipeline_tracker,
         )
 
     def get_train_dataloader(self):
@@ -1024,6 +1034,16 @@ class GRPOTrainer(Trainer):
                 # Get batch result
                 batch_result = self.async_generator.get_batch(batch_id_to_retrieve)
                 processed_results = batch_result.processed_results
+                
+                # Notify tracker that training is starting for this batch
+                if self.async_generator.pipeline_tracker:
+                    tracker_batch_id = self.async_generator.get_tracker_batch_id(batch_id_to_retrieve)
+                    if tracker_batch_id is not None:
+                        self.async_generator.pipeline_tracker.start_training(tracker_batch_id)
+                        # Store the tracker batch_id for compute_loss
+                        self._current_batch_id = tracker_batch_id
+                    else:
+                        self._current_batch_id = batch_id_to_retrieve
 
                 # Package raw data for broadcast (not tensors yet)
                 broadcast_data = {
@@ -1282,6 +1302,12 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["clip_ratio/region_mean"].append(
             gathered_clip_ratio.nanmean().item()
         )  # type: ignore
+        # Store the current batch_id for tracking
+        if hasattr(self, '_current_batch_id'):
+            # Notify tracker that training is complete for this batch
+            if self.async_generator.pipeline_tracker and self.accelerator.is_main_process:
+                self.async_generator.pipeline_tracker.complete_training(self._current_batch_id)
+        
         return loss
 
     def evaluate(

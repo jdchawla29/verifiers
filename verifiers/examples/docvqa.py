@@ -78,7 +78,7 @@ def qwen_data_collator(batch: list[dict]) -> list[dict]:
 
 
 dataset = load_dataset("lmms-lab/DocVQA", "DocVQA", split="validation[10%:]")
-eval_dataset = load_dataset("lmms-lab/DocVQA", "DocVQA", split="validation[:10%]")
+eval_dataset = load_dataset("lmms-lab/DocVQA", "DocVQA", split="validation[:20]")  # Only use 20 examples for evaluation
 
 parser = vf.XMLParser(["think", "answer"], answer_field="answer")
 system_prompt = f"""Answer the questions.
@@ -346,15 +346,15 @@ training_args = vf.grpo_defaults(run_name=run_name)
 training_args.learning_rate = 3e-6
 training_args.max_steps = 100  # Limit steps for testing
 training_args.eval_strategy = "steps"
-training_args.eval_steps = 50
+training_args.eval_steps = 10  # Evaluate every 10 steps
 training_args.gradient_checkpointing_kwargs = {
     "use_reentrant": False,
 }
 
 # GRPO specific settings
 training_args.num_generations = 4  # Number of generations per prompt
-training_args.per_device_train_batch_size = 2  # Minimum 2 for GRPO
-training_args.gradient_accumulation_steps = 2  # Effective batch size = 4
+training_args.per_device_train_batch_size = 4  # Increased from 2
+training_args.gradient_accumulation_steps = 2  # Effective batch size = 8
 
 # Memory optimization settings
 training_args.fp16 = True  # Use mixed precision training

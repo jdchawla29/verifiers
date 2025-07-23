@@ -88,14 +88,33 @@ class Rubric:
             try:
                 ans = func(**merged)
             except Exception as e:
-                self.logger.error(f"Error calling reward function {func.__name__}: {e}")
+                self.logger.error(
+                    f"Error calling reward function {func.__name__} with VAR_KEYWORD params: {e}",
+                    exc_info=True,
+                    extra={
+                        "func_name": func.__name__,
+                        "task": task,
+                        "has_prompt": bool(prompt),
+                        "has_completion": bool(completion),
+                    }
+                )
                 ans = 0.0
         else:
             allowed = {k: v for k, v in merged.items() if k in sig.parameters}
             try:
                 ans = func(**allowed)
             except Exception as e:
-                self.logger.error(f"Error calling reward function {func.__name__}: {e}")
+                self.logger.error(
+                    f"Error calling reward function {func.__name__} with filtered params: {e}",
+                    exc_info=True,
+                    extra={
+                        "func_name": func.__name__,
+                        "task": task,
+                        "allowed_params": list(allowed.keys()),
+                        "has_prompt": bool(prompt),
+                        "has_completion": bool(completion),
+                    }
+                )
                 ans = 0.0
         return ans
 

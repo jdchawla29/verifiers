@@ -1,4 +1,5 @@
 import importlib
+import logging
 from importlib.util import find_spec
 from importlib import import_module
 from typing import Dict, Any, Union, Tuple, Callable
@@ -8,6 +9,8 @@ from transformers import AutoModelForCausalLM, AutoModel, AutoProcessor, AutoCon
 from transformers.models.auto.modeling_auto import AutoModelForSeq2SeqLM, AutoModelForVision2Seq
 
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 class _ForwardRedirection:
     """Implements the `forward-redirection`.
@@ -100,23 +103,23 @@ def get_model(model_name: str, use_liger: bool = True, liger_patch_suffix: str |
             use_cache=False,
         )
     if is_liger_available() and use_liger:
-        print("Using Liger kernel")
+        logger.info("Using Liger kernel")
         try:
             from liger_kernel.transformers import AutoLigerKernelForCausalLM  # type: ignore
             model = AutoLigerKernelForCausalLM.from_pretrained(model_name, **model_kwargs)
             return model
         except ValueError: # try monkey patch
-            print(f"Model {model_name} is not supported with AutoLigerKernelForCausalLM. Attempting monkey patch...")
+            logger.info(f"Model {model_name} is not supported with AutoLigerKernelForCausalLM. Attempting monkey patch...")
             if liger_patch_suffix is None: # try with model tpe
                 liger_patch_suffix = AutoConfig.from_pretrained(model_name, trust_remote_code=True).model_type
-                print(f"No liger_patch_suffix provided, attempting with model_type: {liger_patch_suffix}")
+                logger.info(f"No liger_patch_suffix provided, attempting with model_type: {liger_patch_suffix}")
             patch_func_name = f"apply_liger_kernel_to_{liger_patch_suffix}"
             ligermod  = importlib.import_module("liger_kernel.transformers")
             patch_func  = getattr(ligermod, patch_func_name, None)
             if callable(patch_func):
                 patch_func()
                 model = generic_model_loader(model_name, **model_kwargs)
-                print(f"Applied Liger-Kernel patch to {model_name}")
+                logger.info(f"Applied Liger-Kernel patch to {model_name}")
                 return model
             else:
                 raise ValueError(f"Model {model_name} may not be supported with Liger-Kernel in verifiers. Check the Liger-Kernel documentation.")

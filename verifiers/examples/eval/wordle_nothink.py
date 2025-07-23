@@ -1,7 +1,10 @@
 import os
+import logging
 from openai import OpenAI
 import verifiers as vf
 from verifiers.envs.textarena_env import TextArenaEnv
+
+logger = logging.getLogger(__name__)
 
 NOTHINK_WORDLE_SYSTEM_PROMPT = """You are a competitive game player. \
 Make sure you read the game instructions carefully, and always follow the required format.
@@ -61,17 +64,17 @@ def main(api: str, num_examples: int, rollouts_per_example: int, max_tokens: int
         max_concurrent=20
     )
 
-    print('--- Example ---')
-    print('Prompt: ', results['prompt'][0])
-    print('Completion: ', results['completion'][0])
-    print('Answer: ', results['answer'][0])
+    logger.info('--- Example ---')
+    logger.info('Prompt: %s', results['prompt'][0])
+    logger.info('Completion: %s', results['completion'][0])
+    logger.info('Answer: %s', results['answer'][0])
     for k, v in results.items():
         if "reward" in k:
-            print(k, ': ', v[0]) 
-    print("--- Rewards ---")
+            logger.info('%s: %s', k, v[0]) 
+    logger.info("--- Rewards ---")
     for k, v in results.items():
         if 'reward' in k:
-            print(k, '-', sum(v) / len(v)) 
+            logger.info('%s - %s', k, sum(v) / len(v)) 
     if save_dataset:
         dataset_dsv3 = vf_env.make_dataset(results)
         # filter to top half of rows by rewards

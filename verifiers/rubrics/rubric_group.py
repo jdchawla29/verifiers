@@ -1,4 +1,5 @@
 from typing import List, Dict
+from tqdm import tqdm
 
 from verifiers import (
     Info,
@@ -54,16 +55,26 @@ class RubricGroup(Rubric):
         Run all rubrics sequentially and return the aggregated scores.
 
         Reward functions with the same name are summed up.
+        Shows a parent progress bar for the rubric group and individual progress bars for each rubric.
         """
         all_scores = {} 
-        for rubric in self.rubrics:
+        
+        # For now, just show which rubric is being evaluated since tqdm_asyncio doesn't support position
+        for i, rubric in enumerate(self.rubrics):
+            rubric_name = rubric.__class__.__name__
+            self.logger.info(f"Evaluating rubric {i+1}/{len(self.rubrics)}: {rubric_name}")
+            
+            # Each rubric's score_rollouts will create its own progress bar
             rubric_scores = await rubric.score_rollouts(
                 prompts, completions, answers, states, tasks, infos,
                 **kwargs)
+            
+            # Aggregate scores
             for key, value in rubric_scores.items():
                 if key in all_scores:
                     # element-wise sum
                     all_scores[key] = [a + b for a, b in zip(all_scores[key], value)]
                 else:
                     all_scores[key] = value
+        
         return all_scores

@@ -1,6 +1,9 @@
+import logging
 import verifiers as vf
 from verifiers.tools import python
 from verifiers.utils.data_utils import load_example_dataset
+
+logger = logging.getLogger(__name__)
 
 """
 Multi-GPU training (single node, 4 training + 4 inference)
@@ -53,7 +56,7 @@ vf_env = vf.ToolEnv(
     max_steps=3,
     sampling_args={"extra_body": {"logprobs": True}}
 )
-print(vf_env.system_prompt)
+logger.info(vf_env.system_prompt)
 
 model_name = "willcb/Qwen2.5-7B-Math-Python-SFT"
 model, tokenizer = vf.get_model_and_tokenizer(model_name)

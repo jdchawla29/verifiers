@@ -109,6 +109,17 @@ class VLLMClient(AsyncOpenAI):
                 # Check if the total timeout duration has passed
                 elapsed_time = time.time() - start_time
                 if elapsed_time >= total_timeout:
+                    logger.error(
+                        f"Failed to connect to vLLM server after timeout: {exc}",
+                        exc_info=True,
+                        extra={
+                            "host": self.host,
+                            "port": self.server_port,
+                            "elapsed_time": elapsed_time,
+                            "total_timeout": total_timeout,
+                            "url": url
+                        }
+                    )
                     raise ConnectionError( # type: ignore
                         f"The vLLM server can't be reached at {self.host}:{self.server_port} after {total_timeout} "
                         "seconds. Make sure the server is running by running `trl vllm-serve`."
@@ -132,7 +143,15 @@ class VLLMClient(AsyncOpenAI):
         try:
             response = requests.get(url)
         except Exception as e:
-            logger.error(f"Failed to get world size: {e}")
+            logger.error(
+                f"Failed to get world size from vLLM server: {e}",
+                exc_info=True,
+                extra={
+                    "url": url,
+                    "server_host": self.host,
+                    "server_port": self.server_port
+                }
+            )
             raise
             
         if response.status_code == 200:
@@ -151,7 +170,16 @@ class VLLMClient(AsyncOpenAI):
         try:
             response = self.session.post(url, json={"host": self.host, "port": self.group_port, "world_size": world_size})
         except Exception as e:
-            logger.error(f"Failed to init communicator: {e}")
+            logger.error(
+                f"Failed to initialize communicator with vLLM server: {e}",
+                exc_info=True,
+                extra={
+                    "url": url,
+                    "host": self.host,
+                    "port": self.group_port,
+                    "world_size": world_size
+                }
+            )
             raise
             
         if response.status_code != 200:
@@ -188,11 +216,29 @@ class VLLMClient(AsyncOpenAI):
         # Add timeout to prevent hanging on HTTP request
         try:
             response = self.session.post(url, json={"name": name, "dtype": dtype, "shape": shape}, timeout=300.0)
-        except requests.exceptions.Timeout:
-            logger.error(f"Timeout waiting for server response for {name} after 300s")
+        except requests.exceptions.Timeout as e:
+            logger.error(
+                f"Timeout waiting for server response when updating parameter: {e}",
+                exc_info=True,
+                extra={
+                    "param_name": name,
+                    "param_dtype": dtype,
+                    "param_shape": shape,
+                    "timeout_seconds": 300
+                }
+            )
             raise Exception(f"Request timeout for {name} after 300s")
         except Exception as e:
-            logger.error(f"Error sending request for {name}: {e}")
+            logger.error(
+                f"Error sending request to update named parameter: {e}",
+                exc_info=True,
+                extra={
+                    "param_name": name,
+                    "param_dtype": dtype,
+                    "param_shape": shape,
+                    "url": url
+                }
+            )
             raise
             
         if response.status_code != 200:
@@ -227,8 +273,17 @@ class VLLMClient(AsyncOpenAI):
 
         try:
             response = self.session.post(url)
-        except ConnectionError:
+        except ConnectionError as e:
             # The server might be already down, so we don't need to close the communicator
+            logger.error(
+                f"ConnectionError when closing communicator (server may be down): {e}",
+                exc_info=True,
+                extra={
+                    "url": url,
+                    "host": self.host,
+                    "server_port": self.server_port
+                }
+            )
             pass
         else:
             if response.status_code != 200:

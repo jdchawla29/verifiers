@@ -259,7 +259,21 @@ class GRPOTrainer(Trainer):
         peft_config: Optional[PeftConfig] = None,
         **kwargs,
     ):
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(f"verifiers.trainers.{self.__class__.__name__}")
+
+        # Log training hyperparameters at initialization
+        self.logger.debug(
+            f"Initializing GRPOTrainer with hyperparameters: "
+            f"per_device_train_batch_size={args.per_device_train_batch_size}, "
+            f"gradient_accumulation_steps={args.gradient_accumulation_steps}, "
+            f"num_generations={args.num_generations}, "
+            f"num_iterations={args.num_iterations}, "
+            f"max_seq_len={args.max_seq_len}, "
+            f"beta={args.beta}, "
+            f"epsilon=[{args.epsilon}, {args.epsilon_high}], "
+            f"loss_type={args.loss_type}, "
+            f"scale_rewards={args.scale_rewards}"
+        )
 
         # Models
         if peft_config is not None:
@@ -662,6 +676,7 @@ class GRPOTrainer(Trainer):
 
     def _inner_training_loop(self, *args, **kwargs):
         """Override to ensure async generator is stopped when training ends"""
+        self.logger.debug(f"Starting training loop with max_steps={self.state.max_steps}")
         try:
             return super()._inner_training_loop(*args, **kwargs)
         finally:
@@ -671,6 +686,7 @@ class GRPOTrainer(Trainer):
                 and self._async_started
                 and self.accelerator.is_main_process
             ):
+                self.logger.debug("Stopping async generator after training")
                 self.async_generator.stop()
             self._async_started = False
 
@@ -932,10 +948,18 @@ class GRPOTrainer(Trainer):
 
         # Check if we need to generate new completions
         if self._step % generate_every == 0 or self._buffered_inputs is None:
+            self.logger.debug(
+                f"Generating new completions at step {self._step} "
+                f"(generate_every={generate_every}, buffered_inputs={'exists' if self._buffered_inputs else 'None'})"
+            )
             # Update weights to vLLM if needed
             if self.state.global_step > self._last_loaded_step:
                 self.logger.info(
                     f"Syncing weights to vLLM at step {self.state.global_step}"
+                )
+                self.logger.debug(
+                    f"Weight sync details: last_loaded_step={self._last_loaded_step}, "
+                    f"current_global_step={self.state.global_step}"
                 )
                 self._move_model_to_vllm()
                 self._last_loaded_step = self.state.global_step
@@ -953,6 +977,18 @@ class GRPOTrainer(Trainer):
             # This means we should have submitted up to batch_id_to_retrieve + num_batches_ahead
             target_batch_id = (
                 batch_id_to_retrieve + self.async_generator.num_batches_ahead
+            )
+            
+            # Log async queue state
+            pending_count = self.async_generator.get_pending_count()
+            completed_count = self.async_generator.get_completed_count()
+            avg_gen_time = self.async_generator.get_average_generation_time()
+            
+            self.logger.debug(
+                f"Async queue state at step {self._step}: "
+                f"pending={pending_count}, completed={completed_count}, "
+                f"target_batch_id={target_batch_id}, batch_id_to_retrieve={batch_id_to_retrieve}, "
+                f"avg_generation_time={avg_gen_time:.2f}s"
             )
 
             # Submit any missing batches to maintain the pipeline
@@ -987,6 +1023,10 @@ class GRPOTrainer(Trainer):
                 local_batch_size = len(all_prompts) // self.accelerator.num_processes
                 # Submit batch (main process only)
                 if self.accelerator.is_main_process:
+                    self.logger.debug(
+                        f"Submitting batch {batch_id} with {len(all_prompts)} prompts, "
+                        f"local_batch_size={local_batch_size}, batch_offset={batch_offset}"
+                    )
                     request = BatchRequest(
                         batch_id=batch_id,
                         env_inputs={
@@ -1018,12 +1058,28 @@ class GRPOTrainer(Trainer):
             broadcast_object_list(next_batch_id_list, from_process=0)
             self._next_batch_id = next_batch_id_list[0]
             self.accelerator.wait_for_everyone()
+            
+            # Log memory usage if available
+            if torch.cuda.is_available():
+                mem_allocated = torch.cuda.memory_allocated() / 1024**3  # Convert to GB
+                mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                self.logger.debug(
+                    f"GPU memory usage at step {self._step}: "
+                    f"allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB"
+                )
 
             # Now retrieve the batch we need for this step
             if self.accelerator.is_main_process:
+                self.logger.debug(f"Retrieving batch {batch_id_to_retrieve} for step {self._step}")
                 # Get batch result
                 batch_result = self.async_generator.get_batch(batch_id_to_retrieve)
                 processed_results = batch_result.processed_results
+                
+                self.logger.debug(
+                    f"Retrieved batch {batch_id_to_retrieve}: "
+                    f"generation_time={batch_result.generation_time:.2f}s, "
+                    f"num_completions={len(processed_results['completion_ids'])}"
+                )
 
                 # Package raw data for broadcast (not tensors yet)
                 broadcast_data = {
@@ -1174,6 +1230,14 @@ class GRPOTrainer(Trainer):
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor:  # type: ignore
         mode = "train"
+        
+        # Log batch statistics at start of loss computation
+        self.logger.debug(
+            f"Computing loss for step {self._step}: "
+            f"batch_size={inputs['input_ids'].shape[0]}, "
+            f"seq_len={inputs['input_ids'].shape[1]}"
+        )
+        
         # Compute the per-token log probabilities for the model
         input_ids, attention_mask = inputs["input_ids"], inputs["attention_mask"]
         remaining_inputs = inputs.get("remaining_inputs", [])
@@ -1202,6 +1266,14 @@ class GRPOTrainer(Trainer):
         )
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+        
+        # Log advantage statistics
+        self.logger.debug(
+            f"Advantage stats: mean={advantages.mean().item():.4f}, "
+            f"std={advantages.std().item():.4f}, "
+            f"min={advantages.min().item():.4f}, "
+            f"max={advantages.max().item():.4f}"
+        )
 
         if self.delta is not None:
             # Use clamp instead of min to handle tensor-float comparison
@@ -1252,6 +1324,9 @@ class GRPOTrainer(Trainer):
             )  # type: ignore
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
+        
+        # Log loss value
+        self.logger.debug(f"Loss value at step {self._step}: {loss.item():.6f}")
 
         # Compute the clipped probability ratios
         is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages.unsqueeze(1) < 0)
@@ -1282,6 +1357,17 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["clip_ratio/region_mean"].append(
             gathered_clip_ratio.nanmean().item()
         )  # type: ignore
+        
+        # Log gradient norms if in training mode
+        if mode == "train" and self.model.training:
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2).item()
+                    total_norm += param_norm ** 2
+            total_norm = total_norm ** 0.5
+            self.logger.debug(f"Gradient norm at step {self._step}: {total_norm:.4f}")
+        
         return loss
 
     def evaluate(

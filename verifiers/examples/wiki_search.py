@@ -1,3 +1,4 @@
+import logging
 import os
 
 import chromadb
@@ -7,6 +8,8 @@ from openai import OpenAI
 
 import verifiers as vf
 from verifiers.rubrics.judge_rubric import JudgeRubric
+
+logger = logging.getLogger(__name__)
 
 
 """
@@ -57,7 +60,7 @@ def search_pages(query: str) -> list[dict]:
     return output
 
 # test search_pages
-print(search_pages("basketball"))
+logger.info(search_pages("basketball"))
 
 def view_sections(page_id: str) -> list[dict]:
     """View the sections of a page.
@@ -168,7 +171,7 @@ def read_section(section_id: str) -> str:
     else:
         raise ValueError(f"Section not found: {section_id}")
     
-print(read_section("baseball:finnish_baseball"))
+logger.info(read_section("baseball:finnish_baseball"))
 
 
 system_prompt = """

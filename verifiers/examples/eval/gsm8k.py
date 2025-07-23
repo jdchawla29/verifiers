@@ -1,8 +1,11 @@
 import os
+import logging
 from openai import OpenAI
 
 import verifiers as vf
 from verifiers.utils.data_utils import load_example_dataset, extract_boxed_answer
+
+logger = logging.getLogger(__name__)
 
 dataset = load_example_dataset("gsm8k").select(range(100))
 
@@ -44,16 +47,16 @@ def main(num_examples: int, rollouts_per_example: int, max_tokens: int):
         rollouts_per_example=rollouts_per_example,
     )
     
-    print("--- Example ---")
-    print(f"Prompt: {results['prompt'][0]}")
-    print(f"Completion: {results['completion'][0]}")
-    print(f"Answer: {results['answer'][0]}")
-    print(f"Reward: {results['reward'][0]}")
-    print("--- All ---")
-    print("Rewards:")
+    logger.info("--- Example ---")
+    logger.info("Prompt: %s", results['prompt'][0])
+    logger.info("Completion: %s", results['completion'][0])
+    logger.info("Answer: %s", results['answer'][0])
+    logger.info("Reward: %s", results['reward'][0])
+    logger.info("--- All ---")
+    logger.info("Rewards:")
     for k, v in results.items():
         if 'reward' in k:
-            print(k, '-', sum(v) / len(v))
+            logger.info('%s - %s', k, sum(v) / len(v))
 
 if __name__ == "__main__":
     import argparse

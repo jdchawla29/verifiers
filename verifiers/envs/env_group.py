@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Tuple, Union
 
 from datasets import concatenate_datasets
@@ -21,14 +22,17 @@ class EnvGroupRubric(Rubric):
     def __init__(self, env_map: Dict[str, Environment]):
         super().__init__()
         self.env_map = env_map
+        self.logger = logging.getLogger("verifiers.envs.EnvGroupRubric")
         
         # Collect all unique reward function names across all environments
         all_names_set = set()
-        for env in env_map.values():
-            all_names_set.update(env.rubric.get_reward_func_names())
+        for env_name, env in env_map.items():
+            env_reward_names = env.rubric.get_reward_func_names()
+            all_names_set.update(env_reward_names)
+            self.logger.debug(f"Environment '{env_name}' has reward functions: {env_reward_names}")
         self.all_reward_names = sorted(list(all_names_set))
         
-        self.logger.info(f"EnvGroupRubric tracking {len(self.all_reward_names)} unique reward functions")
+        self.logger.info(f"EnvGroupRubric tracking {len(self.all_reward_names)} unique reward functions: {self.all_reward_names}")
     
     def get_reward_func_names(self) -> List[str]:
         """Return all unique reward function names across all environments."""
@@ -48,6 +52,7 @@ class EnvGroupRubric(Rubric):
         Returns a dict with all reward function names, using 0.0 for functions
         not applicable to this sample's environment.
         """
+        self.logger.debug(f"Scoring rollout for task='{task}'")
         # Initialize results with all reward names set to 0.0
         results = {name: 0.0 for name in self.all_reward_names}
         results['reward'] = 0.0
@@ -55,20 +60,21 @@ class EnvGroupRubric(Rubric):
         # Get the appropriate environment
         env = self.env_map.get(task)
         if env is None:
-            self.logger.warning(f"No environment found for task '{task}'")
+            self.logger.warning(f"No environment found for task '{task}', available tasks: {list(self.env_map.keys())}")
             return results
         
         # Score with the environment's rubric
+        self.logger.debug(f"Delegating scoring to environment '{task}'")
         env_results = await env.rubric.score_rollout(
             prompt, completion, answer, state, task, info, **kwargs
         )
-        print(env_results.keys())
-        print(env_results['reward'])
+        self.logger.debug(f"Environment '{task}' returned results: keys={list(env_results.keys())}, reward={env_results.get('reward', 'N/A')}")
         
         # Update results with scores 
         for reward_name, score in env_results.items():
             if reward_name in results:
                 results[reward_name] = score
+                self.logger.debug(f"Setting {reward_name}={score} from environment '{task}'")
         # dummy scores for all reward functions not in the environment
         for reward_name in self.all_reward_names:
             if reward_name not in env_results:
@@ -138,6 +144,7 @@ class EnvGroup(Environment):
             **kwargs
         ) 
         self.logger.info(f"Initialized EnvGroup with {len(envs)} environments: {self.env_names}")
+        self.logger.debug(f"Dataset sizes: train={len(dataset) if dataset else 0}, eval={len(eval_dataset) if eval_dataset else 0}")
     
     async def rollout(self,
                       client: AsyncOpenAI,
@@ -156,13 +163,17 @@ class EnvGroup(Environment):
         2. info['task']  
         3. First environment name (default)
         """
+        self.logger.debug(f"Routing rollout to task='{task}'")
         # Route to appropriate environment
         env = self.env_map[task]
 
         # Pass through all arguments
+        self.logger.debug(f"Delegating rollout to environment '{task}' ({env.__class__.__name__})")
         return await env.rollout(client, model, prompt, answer, task, info, sampling_args, **kwargs)
 
     def get_env_for_task(self, task: str) -> Environment:
         """Get the environment instance for a given task name."""
-        return self.env_map.get(task, self.envs[0]) 
+        env = self.env_map.get(task, self.envs[0])
+        self.logger.debug(f"Getting environment for task='{task}': {env.__class__.__name__}")
+        return env 
         

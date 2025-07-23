@@ -1,4 +1,7 @@
 from typing import Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Import from smolagents package if available, otherwise use local stub
 try:
@@ -45,12 +48,23 @@ class CalculatorTool(Tool):
             "3 * (17 + 4)" -> "63"
             "100 / 5" -> "20.0"
         """
-        if not all(c in self.allowed for c in expression):
+        logger.debug(f"CalculatorTool.forward() called with expression: '{expression}'")
+        
+        invalid_chars = [c for c in expression if c not in self.allowed]
+        if invalid_chars:
+            logger.debug(f"Invalid characters found in expression: {invalid_chars}")
             return "Error: Invalid characters in expression"
+        
+        logger.debug("Expression validation passed, all characters are allowed")
         
         try:
             # Safely evaluate the expression with no access to builtins
+            logger.debug(f"Evaluating expression: {expression}")
             result = eval(expression, {"__builtins__": {}}, {})
-            return str(result)
+            result_str = str(result)
+            logger.debug(f"Calculation successful: {expression} = {result_str}")
+            return result_str
         except Exception as e:
+            logger.debug(f"Calculation failed: {type(e).__name__}: {str(e)}")
+            logger.error(f"Failed to evaluate expression '{expression}': {e}", exc_info=True)
             return f"Error: {str(e)}"

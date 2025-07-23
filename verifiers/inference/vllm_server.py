@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import signal
 from argparse import Namespace
@@ -28,6 +29,8 @@ from vllm.entrypoints.openai.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.launcher import serve_http
+
+logger = logging.getLogger(__name__)
 from vllm.utils import set_ulimit
 from vllm.usage.usage_lib import UsageContext
 
@@ -224,7 +227,7 @@ def main():
     parser = make_arg_parser(parser)
     args = parser.parse_args() or Namespace()
     validate_parsed_serve_args(args)
-    print(args)
+    logger.debug(args)
     uvloop.run(run_server(args))
 
 if __name__ == "__main__":

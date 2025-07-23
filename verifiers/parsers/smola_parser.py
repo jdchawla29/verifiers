@@ -3,6 +3,7 @@ import json
 from typing import List, Dict, Any, Union, Tuple, Optional, Callable
 from types import SimpleNamespace
 
+import logging
 from verifiers.parsers import Parser
 
 class SmolaParser(Parser):
@@ -18,6 +19,8 @@ class SmolaParser(Parser):
             
         The schema is assumed to have no duplicate names.
         """
+        super().__init__()
+        self.logger = logging.getLogger(f"verifiers.parsers.{self.__class__.__name__}")
         self._fields: List[Tuple[str, List[str]]] = []  # List of (canonical, [alternatives])
         seen = set()
         for field in fields:
@@ -105,6 +108,7 @@ class SmolaParser(Parser):
                 
                 # Calculate format score components
                 format_score = 0.0
+                self.logger.debug(f"Message format check - has_any_field: {has_any_field}, fields_with_content: {fields_with_content}, total_fields: {total_fields}, present_field_sets: {present_field_sets}")
                 
                 # Check if any field from the first field set starts the message
                 starts_with_any_field = False
@@ -138,11 +142,15 @@ class SmolaParser(Parser):
                     format_score += 0.2
                 
                 format_scores.append(format_score)
+                self.logger.debug(f"Message format score: {format_score}")
             
             # Return average format adherence
             if not format_scores:
+                self.logger.debug("No format scores calculated, returning 0.0")
                 return 0.0
-            return (sum(format_scores) / len(format_scores))
+            avg_score = sum(format_scores) / len(format_scores)
+            self.logger.debug(f"Average format score across {len(format_scores)} messages: {avg_score}")
+            return avg_score
             
         return format_reward_func
 
@@ -162,6 +170,7 @@ class SmolaParser(Parser):
             parser = SmolaParser(['reasoning', ('code', 'answer')])
             formatted_str = parser.format(reasoning="...", code="...")
         """
+        self.logger.debug(f"Formatting XML with kwargs: {list(kwargs.keys())}")
         parts = []
         for canonical, alternatives in self._fields:
             value = None
@@ -175,10 +184,14 @@ class SmolaParser(Parser):
                         value = kwargs[alt]
                         break
             if value is None:
+                self.logger.error(f"Missing value for field '{canonical}' (allowed: {alternatives})")
                 raise ValueError(f"Missing value for field '{canonical}' (allowed: {alternatives})")
             # Use the canonical name as the tag for formatting.
+            self.logger.debug(f"Adding field '{canonical}' with value length: {len(str(value))}")
             parts.append(f"<{canonical}>\n{value}\n</{canonical}>")
-        return "\n".join(parts)
+        formatted = "\n".join(parts)
+        self.logger.debug(f"Formatted XML output (length: {len(formatted)})")
+        return formatted
     
     def parse(self, text: str, strip: bool = True) -> Any:
         """
@@ -196,23 +209,31 @@ class SmolaParser(Parser):
             
         This implementation also attempts to parse tool JSON content when available.
         """
+        self.logger.debug(f"Parsing XML text (length: {len(text)}, strip: {strip}): {text[:200]}..." if len(text) > 200 else f"Parsing XML text: {text}")
         results: Dict[str, Optional[str]] = {}
         for canonical, alternatives in self._fields:
             # For each allowed alternative tag, search independently.
             for alt in alternatives:
                 # Regex pattern to capture the content between the tags.
                 pattern = rf"<{alt}>\s*(.*?)\s*</{alt}>"
+                self.logger.debug(f"Searching for pattern: {pattern}")
                 match = re.search(pattern, text, re.DOTALL)
                 if match:
                     content = match.group(1).strip() if strip else match.group(1)
+                    self.logger.debug(f"Found match for '{alt}': {content[:100]}..." if len(content) > 100 else f"Found match for '{alt}': {content}")
                     # If the field contains valid JSON and it's a tool field, parse it
                     if alt == 'tool' and content:
                         try:
                             # Try to parse as JSON but preserve the string for the result
-                            json.loads(content)
-                        except json.JSONDecodeError:
+                            parsed_json = json.loads(content)
+                            self.logger.debug(f"Successfully parsed tool JSON: {parsed_json}")
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"Failed to parse tool JSON content: {e}", exc_info=True)
                             pass
                     results[alt] = content
                 else:
+                    self.logger.debug(f"No match found for '{alt}'")
                     results[alt] = None
-        return SimpleNamespace(**results)
+        parsed_result = SimpleNamespace(**results)
+        self.logger.debug(f"Parsed result attributes: {list(results.keys())} with values: {[(k, v[:50] + '...' if v and len(v) > 50 else v) for k, v in results.items()]}")
+        return parsed_result

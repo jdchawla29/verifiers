@@ -2,6 +2,7 @@ from typing import Any, List
 from torch.utils.data import DataLoader
 from collections import deque
 import threading
+import logging
 
 
 class AsyncDataLoaderWrapper:
@@ -22,6 +23,7 @@ class AsyncDataLoaderWrapper:
         self._lock = threading.Lock()
         self._exhausted = False
         self._current_batch = None  # Track the current batch
+        self.logger = logging.getLogger(f"verifiers.trainers.{self.__class__.__name__}")
         
     def __iter__(self):
         """Reset and return iterator"""
@@ -90,8 +92,8 @@ class AsyncDataLoaderWrapper:
             if self._next_iterator is None:
                 try:
                     self._next_iterator = iter(self.dataloader)
-                except Exception:
-                    # Can't create new iterator, we're done
+                except Exception as e:
+                    self.logger.error(f"Failed to create new iterator for next epoch: {e}", exc_info=True)
                     self._exhausted = True
                     return
             

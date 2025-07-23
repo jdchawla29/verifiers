@@ -1,4 +1,5 @@
 import re
+import logging
 from typing import List, Dict, Any, Union, Tuple, Optional, Callable
 from types import SimpleNamespace
 
@@ -21,9 +22,12 @@ class XMLParser(Parser):
             
         The schema is assumed to have no duplicate names.
         """
+        super().__init__()
+        self.logger = logging.getLogger(f"verifiers.parsers.{self.__class__.__name__}")
         self._fields: List[Tuple[str, List[str]]] = []  # List of (canonical, [alternatives])
         self.answer_field = answer_field
         seen = set()
+        self.logger.debug(f"Initializing XMLParser with fields: {fields}, answer_field: {answer_field}")
         for field in fields:
             if isinstance(field, str):
                 canonical = field
@@ -41,6 +45,7 @@ class XMLParser(Parser):
                 raise ValueError(f"Duplicate field name: {canonical}")
             seen.add(canonical)
             self._fields.append((canonical, alternatives))
+        self.logger.debug(f"Parsed fields structure: {self._fields}")
 
     def parse(self, text: str, strip: bool = True) -> Any:
         """
@@ -56,28 +61,44 @@ class XMLParser(Parser):
             `result.code` and `result.answer` are always accessible. If a tag is not
             found in the XML, its corresponding attribute is set to None.
         """
+        self.logger.debug(f"Parsing XML text (length: {len(text)}, strip: {strip}): {text[:200]}..." if len(text) > 200 else f"Parsing XML text: {text}")
         results: Dict[str, Optional[str]] = {}
         for canonical, alternatives in self._fields:
             # For each allowed alternative tag, search independently.
             for alt in alternatives:
                 # Regex pattern to capture the content between the tags.
                 pattern = rf"<{alt}>\s*(.*?)\s*</{alt}>"
+                self.logger.debug(f"Searching for pattern: {pattern}")
                 match = re.search(pattern, text, re.DOTALL)
                 if match:
-                    results[alt] = match.group(1).strip() if strip else match.group(1)
+                    content = match.group(1).strip() if strip else match.group(1)
+                    self.logger.debug(f"Found match for '{alt}': {content[:100]}..." if len(content) > 100 else f"Found match for '{alt}': {content}")
+                    results[alt] = content
                 else:
+                    self.logger.debug(f"No match found for '{alt}'")
                     results[alt] = None
-        return SimpleNamespace(**results)
+        parsed_result = SimpleNamespace(**results)
+        self.logger.debug(f"Parsed result attributes: {list(results.keys())} with values: {[(k, v[:50] + '...' if v and len(v) > 50 else v) for k, v in results.items()]}")
+        return parsed_result
 
     def parse_answer(self, completion: Messages) -> str | None:
         """Extract the last answer from a completion."""
+        self.logger.debug(f"Parsing answer from completion (type: {type(completion)}, answer_field: {self.answer_field})")
         if isinstance(completion, str):
-            return self.parse(completion)
+            parsed = self.parse(completion)
+            answer = getattr(parsed, self.answer_field, None) if hasattr(parsed, self.answer_field) else None
+            self.logger.debug(f"Extracted answer from string: {answer}")
+            return answer
         else:
-            for msg in reversed(self.get_assistant_messages(completion)):
+            assistant_msgs = self.get_assistant_messages(completion)
+            self.logger.debug(f"Searching for answer in {len(assistant_msgs)} assistant messages")
+            for i, msg in enumerate(reversed(assistant_msgs)):
                 parsed = self.parse(msg['content'])
                 if parsed and hasattr(parsed, self.answer_field) and getattr(parsed, self.answer_field) is not None:
-                    return getattr(parsed, self.answer_field)
+                    answer = getattr(parsed, self.answer_field)
+                    self.logger.debug(f"Found answer in message {len(assistant_msgs) - i}: {answer}")
+                    return answer
+        self.logger.debug("No answer found in completion")
         return None
 
     def get_format_str(self) -> str:
@@ -151,6 +172,7 @@ class XMLParser(Parser):
                 
                 # Calculate format score components
                 format_score = 0.0
+                self.logger.debug(f"Message format check - has_any_field: {has_any_field}, fields_with_content: {fields_with_content}, total_fields: {total_fields}, present_field_sets: {present_field_sets}")
                 
                 # Check if any field from the first field set starts the message
                 starts_with_any_field = False
@@ -184,11 +206,15 @@ class XMLParser(Parser):
                     format_score += 0.2
                 
                 format_scores.append(format_score)
+                self.logger.debug(f"Message format score: {format_score}")
             
             # Return average format adherence
             if not format_scores:
+                self.logger.debug("No format scores calculated, returning 0.0")
                 return 0.0
-            return (sum(format_scores) / len(format_scores))
+            avg_score = sum(format_scores) / len(format_scores)
+            self.logger.debug(f"Average format score across {len(format_scores)} messages: {avg_score}")
+            return avg_score
         
         return format_reward_func
 
@@ -208,6 +234,7 @@ class XMLParser(Parser):
             parser = XMLParser(['reasoning', ('code', 'answer')])
             formatted_str = parser.format(reasoning="...", code="...")
         """
+        self.logger.debug(f"Formatting XML with kwargs: {list(kwargs.keys())}")
         parts = []
         for canonical, alternatives in self._fields:
             value = None
@@ -221,7 +248,11 @@ class XMLParser(Parser):
                         value = kwargs[alt]
                         break
             if value is None:
+                self.logger.error(f"Missing value for field '{canonical}' (allowed: {alternatives})")
                 raise ValueError(f"Missing value for field '{canonical}' (allowed: {alternatives})")
             # Use the canonical name as the tag for formatting.
+            self.logger.debug(f"Adding field '{canonical}' with value length: {len(str(value))}")
             parts.append(f"<{canonical}>\n{value}\n</{canonical}>")
-        return "\n".join(parts)
+        formatted = "\n".join(parts)
+        self.logger.debug(f"Formatted XML output (length: {len(formatted)})")
+        return formatted

@@ -1,9 +1,12 @@
+import logging
 import os
 
 from openai import OpenAI
 from datasets import load_dataset
 
 import verifiers as vf
+
+logger = logging.getLogger(__name__)
 
 dataset = load_dataset('agentlans/wikipedia-paragraphs', split='train')
 dataset = dataset.map(lambda x: {'question': x['text'], 'answer': x['text']})

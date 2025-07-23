@@ -23,5 +23,12 @@ class MathRubric(Rubric):
             response = self.parser.parse_answer(completion) or ""
             return 1.0 if grade_answer_mathd(response, answer) or grade_answer_sympy(response, answer) else 0.0
         except Exception as e:
-            self.logger.error(f"Please install math_verify to use this reward function.")
+            self.logger.error(
+                f"Error in correct_answer_reward_func - Please install math_verify to use this reward function: {e}",
+                exc_info=True,
+                extra={
+                    "answer_length": len(answer) if answer else 0,
+                    "has_completion": bool(completion)
+                }
+            )
             raise e

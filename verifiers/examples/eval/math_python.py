@@ -1,9 +1,12 @@
 import os
+import logging
 
 from openai import OpenAI
 import verifiers as vf
 from verifiers.tools import python
-from verifiers.utils.data_utils import load_example_dataset     
+from verifiers.utils.data_utils import load_example_dataset
+
+logger = logging.getLogger(__name__)     
 
 """
 Evaluating multi-turn reasoning before/after training.
@@ -85,10 +88,10 @@ def main(api: str, num_examples: int, rollouts_per_example: int, max_tokens: int
         num_examples=num_examples,
         rollouts_per_example=rollouts_per_example,
     )
-    print("Rewards:")
+    logger.info("Rewards:")
     for k, v in results.items():
         if 'reward' in k:
-            print(k, '-', v)
+            logger.info('%s - %s', k, v)
     if save_dataset:
         dataset_dsv3 = vf_env.make_dataset(results)
         # filter to top half of rows by rewards

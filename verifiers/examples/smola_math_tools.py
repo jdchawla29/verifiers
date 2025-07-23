@@ -1,3 +1,4 @@
+import logging
 from datasets import concatenate_datasets
 
 import verifiers as vf
@@ -5,6 +6,8 @@ from verifiers.utils import load_example_dataset
 from verifiers.prompts.system_prompts import MATH_SMOLA_PROMPT_TEMPLATE
 from verifiers.prompts.few_shots import CALCULATOR_SMOLA_FEW_SHOTS
 from verifiers.envs.smola_tool_env import SmolaToolEnv
+
+logger = logging.getLogger(__name__)
 
 try:    
     from smolagents.default_tools import PythonInterpreterTool # type: ignore
@@ -49,7 +52,7 @@ vf_env = SmolaToolEnv(
     tools=[python_tool, calculator_tool],
     max_steps=5
 )
-print(vf_env.system_prompt)
+logger.info(vf_env.system_prompt)
 
 model_name = "Qwen/Qwen2.5-7B-Instruct"
 model, tokenizer = vf.get_model_and_tokenizer(model_name)

@@ -1,6 +1,9 @@
+import logging
 import verifiers as vf
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
+
+logger = logging.getLogger(__name__)
 
 """
 accelerate launch --config-file configs/zero3.yaml --num-processes 2 verifiers/examples/sft/reverse_text.py
@@ -21,11 +24,11 @@ for row in dataset:
     tok_counts.append(len(toks))
 
 # tok count stats
-print(f"Dataset size: {len(tok_counts)}")
-print(f"Min tokens: {min(tok_counts)}")
-print(f"Max tokens: {max(tok_counts)}")
-print(f"Mean tokens: {sum(tok_counts) / len(tok_counts)}")
-print(f"Median tokens: {sorted(tok_counts)[len(tok_counts) // 2]}")
+logger.info(f"Dataset size: {len(tok_counts)}")
+logger.info(f"Min tokens: {min(tok_counts)}")
+logger.info(f"Max tokens: {max(tok_counts)}")
+logger.info(f"Mean tokens: {sum(tok_counts) / len(tok_counts)}")
+logger.info(f"Median tokens: {sorted(tok_counts)[len(tok_counts) // 2]}")
 
 args = SFTConfig(
     max_length=4096,

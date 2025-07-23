@@ -1,9 +1,12 @@
 import os
+import logging
 
 from openai import OpenAI
 from datasets import load_dataset
 
 import verifiers as vf
+
+logger = logging.getLogger(__name__)
 
 dataset = load_dataset('agentlans/wikipedia-paragraphs', split='train')
 dataset = dataset.map(lambda x: {'question': x['text'], 'answer': x['text'][::-1]})
@@ -66,14 +69,14 @@ def main(api: str, num_examples: int, rollouts_per_example: int, max_tokens: int
         rollouts_per_example=rollouts_per_example,
     )
 
-    print('--- Example ---')
-    print('Prompt: ', results['prompt'][0])
-    print('Completion: ', results['completion'][0])
-    print('Answer: ', results['answer'][0])
-    print("--- Rewards ---")
+    logger.info('--- Example ---')
+    logger.info('Prompt: %s', results['prompt'][0])
+    logger.info('Completion: %s', results['completion'][0])
+    logger.info('Answer: %s', results['answer'][0])
+    logger.info("--- Rewards ---")
     for k, v in results.items():
         if 'reward' in k:
-            print(k, '-', sum(v) / len(v)) 
+            logger.info('%s - %s', k, sum(v) / len(v)) 
     if save_dataset:
         dataset_dsv3 = vf_env.make_dataset(results)
         # filter to top half of rows by rewards

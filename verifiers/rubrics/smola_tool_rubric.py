@@ -1,8 +1,11 @@
 import json
+import logging
 from typing import List, Any
 
 from verifiers.parsers.smola_parser import SmolaParser
 from verifiers.rubrics.tool_rubric import ToolRubric
+
+logger = logging.getLogger(__name__)
 
 class SmolaToolRubric(ToolRubric):
     def __init__(self,
@@ -33,7 +36,14 @@ class SmolaToolRubric(ToolRubric):
         try:
             test_cases = json.loads(answer)['test_cases']
         except Exception as e:
-            print(f"Error parsing test cases: {e}")
+            logger.error(
+                f"Error parsing test cases from answer: {e}",
+                exc_info=True,
+                extra={
+                    "answer_length": len(answer) if answer else 0,
+                    "answer_type": type(answer).__name__
+                }
+            )
             return 0.0
         # strip ```python and ``` if present at the beginning and end of the code
         code_str = code_str.strip()
@@ -76,6 +86,14 @@ class SmolaToolRubric(ToolRubric):
                         passed += 1
                     
             except Exception as e:
+                logger.error(
+                    f"Error executing code for test case: {e}",
+                    exc_info=True,
+                    extra={
+                        "test_input": test.get('input', 'N/A'),
+                        "code_length": len(code_str)
+                    }
+                )
                 sys.stdin = sys.__stdin__
                 return 0.0
             sys.stdin = sys.__stdin__

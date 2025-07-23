@@ -5,10 +5,13 @@ Call grade_answer(given_answer: str, ground_truth: str).
 """
 
 import re
+import logging
 
 import sympy
 from pylatexenc import latex2text
 from sympy.parsing import sympy_parser
+
+logger = logging.getLogger(__name__)
 
 
 # Dan Hendrycks' code
@@ -22,7 +25,8 @@ def mathd_normalize_answer(answer: str | None) -> str | None:
         if m is not None:
             answer = m.group("text").strip()
         return _strip_string(answer)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in mathd_normalize_answer: {e}", exc_info=True, extra={"answer": answer[:100] if answer else None})
         return answer
 
 
@@ -39,7 +43,8 @@ def _strip_string(string):
                 else:
                     try:
                         assert len(substr) >= 2
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Error in _fix_fracs assertion: {e}", exc_info=True, extra={"substr": substr})
                         return string
                     a = substr[0]
                     b = substr[1]
@@ -69,7 +74,8 @@ def _strip_string(string):
             assert string == "{}/{}".format(a, b)
             new_string = "\\frac{" + str(a) + "}{" + str(b) + "}"
             return new_string
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error in _fix_sqrt: {e}", exc_info=True, extra={"string": string[:100] if string else None})
             return string
 
     def _remove_right_units(string):
@@ -201,14 +207,16 @@ def _is_float(num: str) -> bool:
     try:
         float(num)
         return True
-    except ValueError:
+    except ValueError as e:
+        logger.error(f"ValueError in _is_float: {e}", exc_info=True, extra={"num": num})
         return False
 
 
 def _is_int(x: float) -> bool:
     try:
         return abs(x - int(round(x))) <= 1e-7
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in _is_int: {e}", exc_info=True, extra={"x": x})
         return False
 
 
@@ -221,7 +229,8 @@ def _str_is_int(x: str) -> bool:
         x = _strip_properly_formatted_commas(x)
         x = float(x)
         return abs(x - int(round(x))) <= 1e-7
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in _str_is_int: {e}", exc_info=True, extra={"x": x[:100] if isinstance(x, str) else x})
         return False
 
 
@@ -303,7 +312,8 @@ def _normalize(expr: str) -> str:
     if "\\" in expr:
         try:
             expr = _parse_latex(expr)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error parsing latex in _normalize: {e}", exc_info=True, extra={"expr": expr[:100] if expr else None})
             pass
 
     # edge case with mixed numbers and negative signs
@@ -357,7 +367,8 @@ def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
             simplified = sympy.simplify(sympy_diff)
             if simplified == 0:
                 are_equal = True
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in are_equal_under_sympy: {e}", exc_info=True, extra={"ground_truth": ground_truth_normalized[:100] if ground_truth_normalized else None, "given": given_normalized[:100] if given_normalized else None})
         pass
     return are_equal
 
@@ -415,7 +426,8 @@ def remove_boxed(s):
         assert s[: len(left)] == left
         assert s[-1] == "}"
         return s[len(left) : -1]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in remove_boxed: {e}", exc_info=True, extra={"s": s[:100] if s else None})
         return None
 
 

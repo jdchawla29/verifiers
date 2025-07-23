@@ -41,7 +41,15 @@ class ToolRubric(Rubric):
         
         try:
             test_cases = json.loads(answer)['test_cases']
-        except:
+        except Exception as e:
+            self.logger.error(
+                f"Error parsing test cases from answer in evaluate_code: {e}",
+                exc_info=True,
+                extra={
+                    "answer_length": len(answer) if answer else 0,
+                    "answer_type": type(answer).__name__
+                }
+            )
             return 0.0
         # strip ```python and ``` if present at the beginning and end of the code
         code_str = code_str.strip()
@@ -84,6 +92,14 @@ class ToolRubric(Rubric):
                         passed += 1
                     
             except Exception as e:
+                self.logger.error(
+                    f"Error executing code for test case in evaluate_code: {e}",
+                    exc_info=True,
+                    extra={
+                        "test_input": test.get('input', 'N/A'),
+                        "code_length": len(code_str)
+                    }
+                )
                 sys.stdin = sys.__stdin__
                 return 0.0
             sys.stdin = sys.__stdin__
@@ -156,7 +172,14 @@ class ToolRubric(Rubric):
                                     parsed_response = self.env_parser.parse(completion[i + 1]['content'])
                                     if hasattr(parsed_response, 'result') and parsed_response.result is not None and not parsed_response.result.startswith("Error:"):
                                         successful_executions += 1
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            self.logger.error(
+                                f"Error parsing tool JSON in reward functions: {e}",
+                                exc_info=True,
+                                extra={
+                                    "tool_content": parsed.tool[:100] if parsed.tool else None
+                                }
+                            )
                             pass
             
             # Calculate reward
@@ -217,7 +240,14 @@ class ToolRubric(Rubric):
                             command = json.loads(parsed.tool)
                             if isinstance(command, dict) and command.get("name") == tool_name:
                                 attempted_executions += 1
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            self.logger.error(
+                                f"Error parsing tool JSON in reward functions: {e}",
+                                exc_info=True,
+                                extra={
+                                    "tool_content": parsed.tool[:100] if parsed.tool else None
+                                }
+                            )
                             pass
             return attempted_executions
             

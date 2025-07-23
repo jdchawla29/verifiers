@@ -98,6 +98,7 @@ class Environment(ABC):
         data_collator: Callable | None = None,
         **kwargs,
     ):
+        self.logger = logging.getLogger(f"verifiers.envs.{self.__class__.__name__}")
         self.client = client
         self.model = model
         self.message_type: Literal["chat", "completion"] = message_type
@@ -152,9 +153,13 @@ class Environment(ABC):
             if k != "extra_body":
                 self.sampling_args[k] = v
         self.max_workers = max_workers
-        self.logger = logging.getLogger(f"verifiers.envs.{self.__class__.__name__}")
+        self.logger.debug(f"Initializing {self.__class__.__name__} with: model={model}, message_type={message_type}, "
+                         f"dataset_size={len(dataset) if dataset else None}, eval_dataset_size={len(eval_dataset) if eval_dataset else None}, "
+                         f"system_prompt_length={len(system_prompt) if system_prompt else 0}, few_shot_count={len(few_shot)}, "
+                         f"sampling_args={sampling_args}, max_workers={max_workers}")
         for key, value in kwargs.items():
             setattr(self, key, value)
+            self.logger.debug(f"Setting additional attribute: {key}={value}")
 
         if self.dataset is None and self.eval_dataset is None:
             raise ValueError("Either dataset or eval_dataset must be provided")
@@ -181,8 +186,10 @@ class Environment(ABC):
         question_key: str = "question",
         answer_key: str = "answer",
     ) -> Dataset:
+        self.logger.debug(f"Formatting dataset with {len(dataset)} examples, question_key={question_key}, answer_key={answer_key}")
         # skip if "prompt" already exists
         if "prompt" in dataset.column_names:
+            self.logger.debug("Dataset already contains 'prompt' column, skipping formatting")
             return dataset
 
         # extract format_prompt as a standalone function to avoid capturing self
@@ -210,17 +217,21 @@ class Environment(ABC):
             )
 
     def get_dataset(self, n: int = -1, seed: int | None = None, **kwargs) -> Dataset:
+        self.logger.debug(f"Getting dataset with n={n}, seed={seed}")
         if self.dataset is None:
             raise ValueError("dataset is not set")
         if seed is not None:
+            self.logger.debug(f"Shuffling dataset with seed={seed}")
             self.dataset = self.dataset.shuffle(seed=seed)
         if n > 0:
+            self.logger.debug(f"Selecting first {n} examples from dataset")
             return self.dataset.select(range(n))
         return self.dataset
 
     def get_eval_dataset(
         self, n: int = -1, seed: int | None = None, **kwargs
     ) -> Dataset | dict[Any, list[Any]] | None:
+        self.logger.debug(f"Getting eval dataset with n={n}, seed={seed}")
         if self.eval_dataset is None:
             self.logger.warning(
                 "eval_dataset is not set, falling back to train dataset"
@@ -259,6 +270,7 @@ class Environment(ABC):
         """
         if message_type is None:
             message_type = self.message_type
+        self.logger.debug(f"Getting model response: model={model}, message_type={message_type}, sampling_args={sampling_args}")
 
         if message_type == "chat":
             assert isinstance(prompt, list)
@@ -329,6 +341,7 @@ class Environment(ABC):
         Run rollouts for a given list of prompts and return the completions.
         """
         from tqdm.asyncio import tqdm_asyncio
+        self.logger.debug(f"Running {len(prompts)} rollouts with model={model}, max_concurrent={max_concurrent}")
 
         if max_concurrent > 0:
             semaphore = asyncio.Semaphore(max_concurrent)
@@ -370,6 +383,7 @@ class Environment(ABC):
         """
         Generate completions and rewards for a given set of inputs.
         """
+        self.logger.debug(f"Starting async generation with score_rollouts={score_rollouts}, max_concurrent={max_concurrent}")
         # use class-level client and model if not provided
         if client is None:
             assert self.client is not None
@@ -379,13 +393,16 @@ class Environment(ABC):
             model = self.model
         gen_sampling_args = deepcopy(self.sampling_args)
         gen_sampling_args.update(sampling_args)
+        self.logger.debug(f"Using model={model}, sampling_args={gen_sampling_args}")
 
         # run rollouts
         if isinstance(inputs, Dataset):
             # get prompt column
             results = {col: deepcopy(inputs[col]) for col in inputs.column_names}
+            self.logger.debug(f"Processing Dataset with columns: {inputs.column_names}")
         else:
             results = {col: deepcopy(inputs[col]) for col in inputs}
+            self.logger.debug(f"Processing dict inputs with keys: {list(inputs.keys())}")
         if "prompt" not in results:
             raise ValueError("prompt column not found in inputs")
         if "answer" not in results and "info" not in results:
@@ -403,6 +420,7 @@ class Environment(ABC):
         else:
             prompts = results["prompt"]
 
+        self.logger.debug(f"Starting rollouts for {len(prompts)} prompts")
         rollouts = await self.run_rollouts(
             prompts=prompts,
             answers=results["answer"],
@@ -416,7 +434,9 @@ class Environment(ABC):
         )
         results["completion"] = [rollout[0] for rollout in rollouts]
         results["state"] = [rollout[1] for rollout in rollouts]
+        self.logger.debug(f"Completed rollouts, got {len(rollouts)} completions")
         if score_rollouts:
+            self.logger.debug("Scoring rollouts with rubric")
             results_rewards = await self.rubric.score_rollouts(
                 prompts=results["prompt"],
                 completions=results["completion"],
@@ -428,6 +448,7 @@ class Environment(ABC):
             )
             # add rewards to results
             results.update(results_rewards)
+            self.logger.debug(f"Scoring complete, reward keys: {list(results_rewards.keys())}")
         return results
 
     def generate(
@@ -463,7 +484,8 @@ class Environment(ABC):
             finally:
                 loop.close()
                 asyncio.set_event_loop(None)
-        except RuntimeError:
+        except RuntimeError as e:
+            self.logger.error(f"Failed to create new event loop, falling back to nest_asyncio: {e}", exc_info=True)
             import nest_asyncio  # type: ignore
 
             nest_asyncio.apply()
@@ -652,6 +674,8 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         """
         # Determine format from first prompt
         is_chat_format = isinstance(prompts[0], list)
+        self.logger.debug(f"Processing env results: {len(prompts)} prompts, is_chat_format={is_chat_format}, "
+                         f"max_seq_len={max_seq_len}, mask_env_responses={mask_env_responses}")
 
         all_prompt_ids = []
         all_prompt_masks = []
@@ -685,12 +709,14 @@ Model copies with swapped templates are available here: https://huggingface.co/c
 
             is_truncated = False
             if max_seq_len > 0 and len(prompt_ids) + len(completion_ids) > max_seq_len:
+                original_length = len(prompt_ids) + len(completion_ids)
                 if len(prompt_ids) > max_seq_len:
                     prompt_ids = prompt_ids[:max_seq_len]
                     prompt_mask = prompt_mask[:max_seq_len]
                 completion_ids = completion_ids[: max_seq_len - len(prompt_ids)]
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
                 is_truncated = True
+                self.logger.debug(f"Truncated sequence from {original_length} to {max_seq_len} tokens")
                 assert len(prompt_ids) + len(completion_ids) <= max_seq_len, (
                     f"Prompt length: {len(prompt_ids)}, completion length: {len(completion_ids)}, max_seq_len: {max_seq_len}"
                 )
@@ -934,6 +960,8 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         """
         Evaluate model on the Environment evaluation dataset.
         """
+        self.logger.debug(f"Starting evaluation: model={model}, num_examples={num_examples}, "
+                         f"rollouts_per_example={rollouts_per_example}, score_rollouts={score_rollouts}")
         if self.eval_dataset is None:
             self.logger.info("eval_dataset is not set, falling back to train dataset")
             assert self.dataset is not None
@@ -957,6 +985,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             max_concurrent,
             **kwargs,
         )
+        self.logger.debug(f"Evaluation complete, generated {len(results.get('completion', []))} completions")
         return results
 
     def make_dataset(

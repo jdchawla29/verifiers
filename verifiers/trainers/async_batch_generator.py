@@ -82,13 +82,22 @@ class AsyncBatchGenerator:
         # Thread management
         self.worker_thread = None
         self.stop_event = threading.Event()
-        self.logger = logging.getLogger(f"AsyncBatchGenerator-{id(self)}")
+        self.logger = logging.getLogger(f"verifiers.trainers.{self.__class__.__name__}")
         self.is_generating = False  # Track if currently generating
         self.worker_loop = None  # Will be set in worker thread
         self.started = False  # Track if generator is started
 
         # Synchronization
         self._lock = threading.Lock()
+        
+        # Log initialization parameters
+        self.logger.debug(
+            f"Initialized AsyncBatchGenerator with: "
+            f"num_batches_ahead={num_batches_ahead}, "
+            f"max_queue_size={self.max_queue_size}, "
+            f"generation_timeout={generation_timeout}s, "
+            f"model_name={model_name}"
+        )
 
     def start(self):
         """Start the async generation worker thread"""
@@ -127,13 +136,24 @@ class AsyncBatchGenerator:
 
         with self._lock:
             if request.batch_id in self.pending_batches:
+                self.logger.debug(f"Batch {request.batch_id} already submitted, skipping")
                 return True  # Already submitted
 
             if len(self.pending_batches) >= self.max_queue_size:
+                self.logger.debug(
+                    f"Queue full: pending_batches={len(self.pending_batches)}, "
+                    f"max_queue_size={self.max_queue_size}"
+                )
                 return False  # Queue full
 
             self.pending_batches.add(request.batch_id)
+            queue_state = len(self.pending_batches)
 
+        self.logger.debug(
+            f"Submitting batch {request.batch_id}: "
+            f"num_prompts={len(request.env_inputs['prompt'])}, "
+            f"queue_state={queue_state}/{self.max_queue_size}"
+        )
         self.request_queue.put(request)
         return True
 
@@ -154,11 +174,18 @@ class AsyncBatchGenerator:
         """
         timeout = timeout or self.generation_timeout
         start_time = time.time()
+        
+        self.logger.debug(
+            f"Getting batch {batch_id}: "
+            f"pending={self.get_pending_count()}, "
+            f"completed={self.get_completed_count()}"
+        )
 
         while True:
             # Check if already completed
             with self._lock:
                 if batch_id in self.completed_batches:
+                    self.logger.debug(f"Batch {batch_id} found in completed_batches")
                     return self.completed_batches.pop(batch_id)
 
             # Check for new results
@@ -237,6 +264,7 @@ class AsyncBatchGenerator:
                         break
 
                     # Generate batch using the async method
+                    self.logger.debug(f"Starting generation for batch {request.batch_id}")
                     start_time = time.time()
                     result = loop.run_until_complete(
                         self._generate_batch_async(request)
@@ -244,11 +272,17 @@ class AsyncBatchGenerator:
                     generation_time = time.time() - start_time
                     result.generation_time = generation_time
                     self.generation_times.append(generation_time)
+                    
+                    self.logger.debug(
+                        f"Completed generation for batch {request.batch_id}: "
+                        f"generation_time={generation_time:.2f}s, "
+                        f"avg_generation_time={self.get_average_generation_time():.2f}s"
+                    )
                     self.result_queue.put(result)
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    self.logger.error(f"Error in generation worker: {e}")
+                    self.logger.error(f"Error in generation worker for batch {request.batch_id if 'request' in locals() else 'unknown'}: {e}", exc_info=True)
                     raise e
         finally:
             # Clean up the client
@@ -264,6 +298,14 @@ class AsyncBatchGenerator:
         """
         # Call environment generation
         self.is_generating = True
+        
+        self.logger.debug(
+            f"Calling env.a_generate for batch {request.batch_id} with "
+            f"max_concurrent={request.max_concurrent}, "
+            f"temperature={self.sampling_args.get('temperature', 'default')}, "
+            f"max_tokens={self.sampling_args.get('max_tokens', 'default')}"
+        )
+        
         env_results = await self.env.a_generate(
             request.env_inputs,
             client=self.client,
@@ -294,6 +336,14 @@ class AsyncBatchGenerator:
             mask_env_responses=request.mask_env_responses,
             mask_truncated_completions=request.mask_truncated_completions,
             zero_truncated_completions=request.zero_truncated_completions,
+        )
+        
+        # Log batch statistics
+        self.logger.debug(
+            f"Batch {request.batch_id} statistics: "
+            f"num_rewards={len(env_results['reward'])}, "
+            f"mean_reward={sum(env_results['reward'])/len(env_results['reward']):.4f}, "
+            f"reward_functions={list(all_reward_dict.keys())}"
         )
 
         return BatchResult(
@@ -383,6 +433,7 @@ class AsyncBatchGenerator:
                     )
                     result_container.append(results)
                 except Exception as e:
+                    self.logger.error(f"Failed to run evaluation: {e}", exc_info=True)
                     exception_container.append(e)
                 finally:
                     await eval_client.close()

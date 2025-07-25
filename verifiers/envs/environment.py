@@ -970,31 +970,143 @@ Model copies with swapped templates are available here: https://huggingface.co/c
     ) -> Dataset:
         """
         Make a dataset from the evaluation results.
+        
+        Normalizes multimodal messages and extracts images to a separate column.
         """
         if push_to_hub and hub_name is None:
             raise ValueError("hub_name must be provided if push_to_hub is True")
 
-        cols = ["prompt", "completion", "answer", "reward"]
-        if results["task"][0] is not None:
-            cols.append("task")
-        if "state" in results:
-            for col in state_columns:
-                if col in results["state"][0]:
-                    results[col] = [state[col] for state in results["state"]]
-                    cols.append(col)
-                else:
-                    self.logger.warning(
-                        f"Column {col} not found in state, skipping from dataset."
-                    )
-        for col in extra_columns:
-            if col in results:
-                cols.append(col)
+        # Collect columns to include
+        cols = self._collect_dataset_columns(results, state_columns, extra_columns)
+        
+        # Process data for each column
+        dataset_data = {}
+        all_images = []
+        
+        for col in cols:
+            if col not in results:
+                continue
+                
+            if col in ["prompt", "completion"]:
+                # Process message columns with image extraction
+                dataset_data[col], images = self._process_message_column(results[col], all_images)
+                all_images = images
             else:
-                self.logger.warning(
-                    f"Column {col} not found in results, skipping from dataset."
-                )
-        dataset = Dataset.from_dict({col: results[col] for col in cols})
+                # Process regular columns
+                dataset_data[col] = self._process_regular_column(results[col])
+        
+        # Add images if any were extracted
+        if all_images and any(imgs for imgs in all_images):
+            dataset_data["images"] = all_images
+        
+        # Create dataset
+        dataset = Dataset.from_dict(dataset_data)
         if push_to_hub:
             assert hub_name is not None
             dataset.push_to_hub(hub_name)
         return dataset
+    
+    def _collect_dataset_columns(self, results: GenerateOutputs, state_columns: List[str], extra_columns: List[str]) -> List[str]:
+        """Determine which columns to include in the dataset."""
+        cols = ["prompt", "completion", "answer", "reward"]
+        
+        # Add task column if present
+        if "task" in results and results["task"][0] is not None:
+            cols.append("task")
+        
+        # Extract columns from state
+        if "state" in results and results["state"]:
+            for col in state_columns:
+                if col in results["state"][0]:
+                    # Extract from state dict into results
+                    results[col] = [state[col] for state in results["state"]]
+                    cols.append(col)
+                else:
+                    self.logger.warning(f"Column {col} not found in state, skipping from dataset.")
+        
+        # Add extra columns
+        for col in extra_columns:
+            if col in results:
+                cols.append(col)
+            else:
+                self.logger.warning(f"Column {col} not found in results, skipping from dataset.")
+        
+        return cols
+    
+    def _process_message_column(self, messages: List[Messages], all_images: List[List[Image.Image]]) -> Tuple[List[Messages], List[List[Image.Image]]]:
+        """Process a column of messages, normalizing content and extracting images."""
+        normalized_messages = []
+        
+        for i, msg_list in enumerate(messages):
+            # Ensure image list exists for this example
+            if len(all_images) <= i:
+                all_images.append([])
+            
+            if not isinstance(msg_list, list):
+                normalized_messages.append(msg_list)
+                continue
+            
+            # Process each message in the list
+            normalized_list = []
+            for msg in msg_list:
+                if isinstance(msg, dict) and "content" in msg:
+                    normalized_msg = self._normalize_message(msg, all_images[i])
+                    normalized_list.append(normalized_msg)
+                else:
+                    normalized_list.append(msg)
+            
+            normalized_messages.append(normalized_list)
+        
+        return normalized_messages, all_images
+    
+    def _normalize_message(self, msg: ChatMessage, image_list: List[Image.Image]) -> ChatMessage:
+        """Normalize a single message, converting content to list format and extracting images."""
+        normalized_msg = msg.copy()
+        content = msg["content"]
+        
+        if isinstance(content, list):
+            # Process multimodal content
+            new_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        new_content.append(item)
+                    elif item.get("type") == "image_url":
+                        # Replace with placeholder and extract image
+                        new_content.append({"type": "image"})
+                        img = self._extract_image(item)
+                        image_list.append(img)
+                else:
+                    new_content.append(item)
+            normalized_msg["content"] = new_content
+        elif isinstance(content, str):
+            # Convert string to list format
+            normalized_msg["content"] = [{"type": "text", "text": content}]
+        else:
+            # Fallback for other types
+            normalized_msg["content"] = [{"type": "text", "text": str(content)}]
+        
+        return normalized_msg
+    
+    def _extract_image(self, item: Dict[str, Any]) -> Optional[Image.Image]:
+        """Extract and convert base64 image URL to PIL Image."""
+        image_url = item.get("image_url", {}).get("url", "")
+        if not image_url or not image_url.startswith("data:image"):
+            return None
+        
+        try:
+            # Extract base64 data after comma
+            base64_str = image_url.split(",", 1)[1] if "," in image_url else ""
+            if base64_str:
+                img_data = base64.b64decode(base64_str)
+                return Image.open(io.BytesIO(img_data))
+        except Exception as e:
+            self.logger.warning(f"Failed to convert image: {e}")
+        
+        return None
+    
+    def _process_regular_column(self, value: Any) -> Any:
+        """Process non-message columns, converting to list if needed."""
+        if hasattr(value, '__iter__') and not isinstance(value, str):
+            return list(value)
+        return value

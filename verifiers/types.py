@@ -2,12 +2,13 @@ from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict, Unio
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.completion import Completion
+from typing import Any, Dict, List, Union
 
 # typing aliases
 MessageType = Literal["chat", "completion"]
 ModelResponse = Union[Completion, ChatCompletion, None]
 ChatMessageField = Literal["role", "content"]
-ChatMessage = Dict[ChatMessageField, str]
+ChatMessage = Dict[ChatMessageField, Union[str, List[Dict[str, Any]]]]
 Message = Union[str, ChatMessage]
 Messages = Union[str, List[ChatMessage]]
 Info = Dict[str, Any]

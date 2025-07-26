@@ -11,8 +11,11 @@ from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
 from PIL import Image
 
-from verifiers import (
+from verifiers.parsers.parser import Parser
+from verifiers.rubrics.rubric import Rubric
+from verifiers.types import (
     ChatCompletion,
+    ChatCompletionToolParam,
     ChatMessage,
     GenerateInputs,
     GenerateOutputs,
@@ -20,10 +23,8 @@ from verifiers import (
     Messages,
     MessageType,
     ModelResponse,
-    Parser,
     ProcessedOutputs,
     RewardFunc,
-    Rubric,
     SamplingArgs,
     State,
 )
@@ -94,6 +95,7 @@ class Environment(ABC):
         rubric: Rubric = Rubric(),
         sampling_args: SamplingArgs = {},
         message_type: MessageType = "chat",
+        oai_tools: List[ChatCompletionToolParam] | None = None,
         max_workers: int = 512,
         data_collator: Callable | None = None,
         **kwargs,
@@ -101,6 +103,7 @@ class Environment(ABC):
         self.client = client
         self.model = model
         self.message_type: Literal["chat", "completion"] = message_type
+        self.oai_tools: List[ChatCompletionToolParam] | None = oai_tools
         self.system_prompt = system_prompt
         self.few_shot = few_shot
         self.data_collator = data_collator
@@ -139,13 +142,7 @@ class Environment(ABC):
 
         self.parser = parser
         self.rubric = rubric
-        self.sampling_args = {
-            "n": 1,  # n > 1 not supported; use duplicate prompts for multiple completions
-            "extra_body": {
-                #    'skip_special_tokens': False,
-                #    'spaces_between_special_tokens': False,
-            },
-        }
+        self.sampling_args = {"n": 1, "extra_body": {}}
         if sampling_args is not None and "extra_body" in sampling_args:
             self.sampling_args["extra_body"].update(sampling_args["extra_body"])
         for k, v in sampling_args.items():
@@ -209,7 +206,7 @@ class Environment(ABC):
                 }
             )
 
-    def get_dataset(self, n: int = -1, seed: int | None = None, **kwargs) -> Dataset:
+    def get_dataset(self, n: int = -1, seed: int | None = None) -> Dataset:
         if self.dataset is None:
             raise ValueError("dataset is not set")
         if seed is not None:
@@ -236,17 +233,18 @@ class Environment(ABC):
             return {key: value_list[:n] for key, value_list in self.eval_dataset.items()}
         return self.eval_dataset
 
-    def get_reward_funcs(self, **kwargs) -> List[RewardFunc]:
+    def get_reward_funcs(self) -> List[RewardFunc]:
         return self.rubric.get_reward_funcs()
 
-    def get_reward_weights(self, **kwargs) -> List[float]:
+    def get_reward_weights(self) -> List[float]:
         return self.rubric.get_reward_weights()
 
     async def get_model_response(
         self,
-        prompt: Messages,
         client: AsyncOpenAI,
         model: str,
+        prompt: Messages,
+        oai_tools: List[ChatCompletionToolParam] | None = None,
         sampling_args: SamplingArgs = {},
         message_type: MessageType | None = None,
         **kwargs,
@@ -257,23 +255,39 @@ class Environment(ABC):
         Convenience function for wrapping (chat, completion) API calls.
         Returns special error messages for context length issues.
         """
-        if message_type is None:
-            message_type = self.message_type
+        try:
+            if message_type is None:
+                message_type = self.message_type
 
-        if message_type == "chat":
-            assert isinstance(prompt, list)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=prompt,  # type: ignore
-                **sampling_args,
-            )
-            return response
-        elif message_type == "completion":
-            assert isinstance(prompt, str)
-            response = await client.completions.create(
-                model=model, prompt=prompt, **sampling_args
-            )
-            return response
+            if message_type == "chat":
+                assert isinstance(prompt, list)
+                if oai_tools:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=prompt,  # type: ignore
+                        tools=oai_tools,
+                        **sampling_args,
+                    )
+                else:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=prompt,  # type: ignore
+                        **sampling_args,
+                    )
+                return response
+            elif message_type == "completion":
+                if oai_tools:
+                    raise ValueError(
+                        "oai_tools are not supported for completion tasks."
+                    )
+                assert isinstance(prompt, str)
+                response = await client.completions.create(
+                    model=model, prompt=prompt, **sampling_args
+                )
+                return response
+        except Exception as e:
+            self.logger.error(f"Error getting model response: {e} \n\nExiting...")
+            raise e
 
     @abstractmethod
     async def rollout(
@@ -890,9 +904,6 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
                 completion_logprobs = completion_logprobs[: max_seq_len - len(prompt_ids)]
                 is_truncated = True
-                assert len(prompt_ids) + len(completion_ids) <= max_seq_len, (
-                    f"Prompt length: {len(prompt_ids)}, completion length: {len(completion_ids)}, max_seq_len: {max_seq_len}"
-                )
             if is_truncated and mask_truncated_completions:
                 completion_mask = [0] * len(completion_ids)
             assert len(prompt_ids) == len(prompt_mask), (

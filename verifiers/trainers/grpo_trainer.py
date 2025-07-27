@@ -572,9 +572,10 @@ class GRPOTrainer(Trainer):
         if self.sync_ref_model:
             self.add_callback(
                 SyncRefModelCallback(
-                    ref_model=self.ref_model, accelerator=self.accelerator
+                    ref_model=self.ref_model,  # type: ignore
+                    accelerator=self.accelerator,
                 )
-            )  # type: ignore
+            )
 
         # Environment
         self.env = env
@@ -786,11 +787,14 @@ class GRPOTrainer(Trainer):
         is_generating = is_generating_list[0]
 
         # All processes wait if generation is happening
+        waits = 0
         while is_generating:
             time.sleep(0.5)
-            self.logger.info(
-                "Waiting for background batch generation to complete before weight syncing."
-            )
+            waits += 1
+            if waits % 10 == 0:
+                self.logger.info(
+                    "Waiting for background batch generation to complete before weight syncing."
+                )
 
             # Check again and broadcast
             if self.accelerator.is_main_process:
@@ -1200,7 +1204,7 @@ class GRPOTrainer(Trainer):
 
         return advantages
 
-    def compute_loss(
+    def compute_loss(  # type: ignore
         self,  # type: ignore
         model: PreTrainedModel,
         inputs: Dict[str, Any],
@@ -1269,8 +1273,8 @@ class GRPOTrainer(Trainer):
             per_token_loss = per_token_loss + self.beta * per_token_kl
             mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
             self._metrics[mode]["kl"].append(
-                self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
-            )  # type: ignore
+                self.accelerator.gather_for_metrics(mean_kl).nanmean().item()  # type: ignore
+            )
         if self.loss_type == "grpo":
             loss = (
                 (per_token_loss * completion_mask).sum(-1)
@@ -1300,23 +1304,46 @@ class GRPOTrainer(Trainer):
 
         gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
         self._metrics[mode]["clip_ratio/low_mean"].append(
-            gathered_low_clip.nanmean().item()
-        )  # type: ignore
+            gathered_low_clip.nanmean().item()  # type: ignore
+        )
         self._metrics[mode]["clip_ratio/low_min"].append(
-            nanmin(gathered_low_clip).item()
-        )  # type: ignore
+            nanmin(gathered_low_clip).item()  # type: ignore
+        )
         gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
         self._metrics[mode]["clip_ratio/high_mean"].append(
-            gathered_high_clip.nanmean().item()
-        )  # type: ignore
+            gathered_high_clip.nanmean().item()  # type: ignore
+        )
         self._metrics[mode]["clip_ratio/high_max"].append(
-            nanmax(gathered_high_clip).item()
-        )  # type: ignore
+            nanmax(gathered_high_clip).item()  # type: ignore
+        )
         gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
         self._metrics[mode]["clip_ratio/region_mean"].append(
-            gathered_clip_ratio.nanmean().item()
-        )  # type: ignore
+            gathered_clip_ratio.nanmean().item()  # type: ignore
+        )
         return loss
+
+    def _sanitize_tool_calls(
+        self,
+        completion: list[dict[str, Any]] | str,
+    ) -> list[dict[str, Any]] | str:
+        if isinstance(completion, str):
+            return completion
+        for msg in completion:
+            if "tool_calls" in msg:
+                tool_calls = []
+                msg["tool_calls"] = []
+                for tc in msg["tool_calls"]:
+                    tool_calls.append(
+                        {
+                            "name": tc.get("function", {}).get("name", ""),
+                            "args": tc.get("function", {}).get("arguments", {}),
+                        }
+                    )
+                msg["content"] += str({"tool_calls": tool_calls})
+                msg.pop("tool_calls")
+            if "tool_call_id" in msg:
+                msg.pop("tool_call_id")
+        return completion
 
     def evaluate(
         self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", **kwargs
@@ -1354,15 +1381,28 @@ class GRPOTrainer(Trainer):
             metrics["eval_reward_std"] = rewards.std().item()
 
         # Log individual reward function scores
+        non_reward_metric_keys = [
+            "reward",
+            "prompt",
+            "completion",
+            "info",
+            "answer",
+            "state",
+            "task",
+        ]
         for key in eval_results:
-            if key.startswith("reward_") and key != "reward":
+            if key not in non_reward_metric_keys:
                 reward_values = eval_results[key]
                 if isinstance(reward_values, list):
-                    metrics[f"eval_rewards/{key[7:]}"] = float(np.mean(reward_values))
+                    metrics[f"eval_rewards/{key}"] = float(np.mean(reward_values))
                 else:
-                    metrics[f"eval_rewards/{key[7:]}"] = reward_values.mean().item()
+                    try:
+                        metrics[f"eval_rewards/{key}"] = reward_values.mean().item()
+                    except Exception:
+                        continue
 
         # Compute completion length statistics
+        assert isinstance(self.processing_class, PreTrainedTokenizerBase)
         if "completion" in eval_results:
             completions = eval_results["completion"]
             if isinstance(completions[0], str):
@@ -1445,7 +1485,7 @@ class GRPOTrainer(Trainer):
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
                     "prompt": prompt,
-                    "completion": completions,
+                    "completion": [self._sanitize_tool_calls(c) for c in completions],
                 }
                 for k, v in reward_dict.items():
                     table_data[k] = v
@@ -1511,7 +1551,10 @@ class GRPOTrainer(Trainer):
                 table = {
                     "step": [str(self.state.global_step)] * len(self._textual_logs["prompt"]),
                     "prompt": prompt,
-                    "completion": list(self._textual_logs["completion"]),
+                    "completion": [
+                        self._sanitize_tool_calls(c)
+                        for c in self._textual_logs["completion"]
+                    ],
                     **{k: list(v) for k, v in self._textual_logs["rewards"].items()},
                 }
                 if len(table["prompt"]) > 0:
@@ -1618,7 +1661,11 @@ class GRPOTrainer(Trainer):
             assert isinstance(self.processing_class, PreTrainedTokenizerBase)
             eos_token_id = self.processing_class.eos_token_id
         for comp_ids, comp_mask in zip(all_completion_ids, all_completion_mask):
-            has_eos = any(token == eos_token_id for token, mask in zip(comp_ids, comp_mask) if mask) # type: ignore
+            has_eos = any(
+                token == self.processing_class.eos_token_id  # type: ignore
+                for token, mask in zip(comp_ids, comp_mask)
+                if mask
+            )
             if has_eos:
                 term_lengths.append(sum(comp_mask))
 

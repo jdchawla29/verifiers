@@ -9,7 +9,7 @@ For local model evaluation:
     # Start vLLM server with a multimodal model
     CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model 'Qwen/Qwen2-VL-2B-Instruct' --max-model-len 32768
     # Run evaluation
-    uv run python examples/eval_docvqa.py --api-type vllm
+    uv run python examples/eval_docvqa.py
 """
 
 import logging
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # Configuration
-    API_TYPE = "openai"  # "openai" or "vllm"
+    API_TYPE = "vllm"  # "openai" or "vllm"
     EVAL_NUM_EXAMPLES = 5  # Number of examples to evaluate
     
     # Load environment
@@ -38,12 +38,8 @@ def main():
     # Set up client and model based on API type
     if API_TYPE == "vllm":
         # vLLM API configuration
-        client = AsyncOpenAI(base_url="http://localhost:8000/v1")
-        # Get model name from vLLM server
-        models = client.models.list()
-        if not models.data:
-            raise ValueError("No models found in vLLM server")
-        MODEL_NAME = models.data[0].id
+        client = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="token")
+        MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
         logger.info(f"Using vLLM model: {MODEL_NAME}")
     else:
         # OpenAI API configuration

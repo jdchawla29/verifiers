@@ -1,4 +1,5 @@
 import asyncio
+import json
 import base64
 import io
 import logging
@@ -396,60 +397,71 @@ class Environment(ABC):
         gen_sampling_args = deepcopy(self.sampling_args)
         gen_sampling_args.update(sampling_args)
 
-        # run rollouts
+        # preprocess dataset or GenerateInputs to GenerateOutputs
+        results_dict = {}
         if isinstance(inputs, Dataset):
             # get prompt column
-            results = {}
+            results_dict = {}
             for col in inputs.column_names:
                 if col == "info":
                     # handle info column to ensure mutable dicts
-                    results[col] = [dict(item) for item in inputs[col]]
+                    results_dict[col] = [dict(item) for item in inputs[col]]
                 else:
-                    results[col] = deepcopy(inputs[col])
+                    results_dict[col] = deepcopy(inputs[col])
         else:
-            results = {col: deepcopy(inputs[col]) for col in inputs}
-        if "prompt" not in results:
+            results_dict = {col: deepcopy(inputs[col]) for col in inputs}
+        if "prompt" not in results_dict:
             raise ValueError("prompt column not found in inputs")
-        if "answer" not in results and "info" not in results:
+        if "answer" not in results_dict and "info" not in results_dict:
             raise ValueError("answer or info column must be found in inputs")
-        if "answer" not in results:
-            results["answer"] = [""] * len(results["prompt"])
-        if "task" not in results:
-            results["task"] = ["default"] * len(results["prompt"])
-        if "info" not in results:
-            results["info"] = [{}] * len(results["prompt"])
+        if "answer" not in results_dict:
+            results_dict["answer"] = [""] * len(results_dict["prompt"])
+        if "task" not in results_dict:
+            results_dict["task"] = ["default"] * len(results_dict["prompt"])
+        if "info" not in results_dict:
+            results_dict["info"] = [{}] * len(results_dict["prompt"])
+        for i, info in enumerate(results_dict["info"]):
+            if isinstance(info, str):
+                info = json.loads(info)
+            if self.oai_tools and "oai_tools" not in info:
+                info["oai_tools"] = self.oai_tools
 
-        # Handle multimodal inputs
-        if results.get("images") is not None:
-            prompts = format_oai_chat_msg(results["prompt"], results["images"])
-        else:
-            prompts = results["prompt"]
-
+        # prepare GenerateOutputs and run rollouts
+        results = GenerateOutputs(
+            prompt=results_dict["prompt"],
+            answer=results_dict["answer"],
+            task=results_dict["task"],
+            info=results_dict["info"],
+            completion=[],
+            state=[],
+            reward=[],
+            metrics={},
+        )
         rollouts = await self.run_rollouts(
-            prompts=prompts,
-            answers=results["answer"],
-            tasks=results["task"],
-            infos=results["info"],
+            prompts=results.prompt,
+            answers=results.answer,
+            tasks=results.task,
+            infos=results.info,
             client=client,
             model=model,
             sampling_args=gen_sampling_args,
             max_concurrent=max_concurrent,
             **kwargs,
         )
-        results["completion"] = [rollout[0] for rollout in rollouts]
-        results["state"] = [rollout[1] for rollout in rollouts]
+        results.completion = [rollout[0] for rollout in rollouts]
+        results.state = [rollout[1] for rollout in rollouts]
         if score_rollouts:
-            results_rewards = await self.rubric.score_rollouts(
-                prompts=results["prompt"],
-                completions=results["completion"],
-                answers=results["answer"],
-                states=results["state"],
-                tasks=results["task"],
-                infos=results["info"],
+            rollout_scores = await self.rubric.score_rollouts(
+                prompts=results.prompt,
+                completions=results.completion,
+                answers=results.answer,
+                states=results.state,
+                tasks=results.task,
+                infos=results.info,
                 apply_weights=True,
             )
-            # add rewards to results
-            results.update(results_rewards)
+            results.reward = rollout_scores.reward
+            results.metrics = rollout_scores.metrics
         return results
 
     def generate(
@@ -743,7 +755,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             completion_mask=all_completion_masks,
             completion_logprobs=all_completion_logprobs,
             rewards=all_rewards,
-            "remaining_inputs": all_remaining_inputs,
+            remaining_inputs=all_remaining_inputs,
         )
 
     def parse_chat_completion_logprobs(
@@ -990,13 +1002,34 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         )
         return results
 
+    def _sanitize_tool_calls(self, completion: Messages) -> Messages:
+        """
+        Sanitize tool calls from a completion.
+        """
+
+        assert isinstance(completion, list)
+        sanitized_completion = []
+        for m in completion:
+            if "tool_calls" in m:
+                new_m = {
+                    "role": m["role"],
+                    "content": m.get("content", ""),
+                    "tool_calls": [
+                        json.dumps(tc.model_dump())  # type: ignore
+                        for tc in m.get("tool_calls", [])
+                    ],
+                }
+                sanitized_completion.append(new_m)
+            else:
+                sanitized_completion.append(m)
+        return sanitized_completion
+
     def make_dataset(
         self,
         results: GenerateOutputs,
         push_to_hub: bool = False,
         hub_name: str | None = None,
         state_columns: List[str] = [],
-        extra_columns: List[str] = [],
         **kwargs,
     ) -> Dataset:
         """
@@ -1007,137 +1040,32 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         if push_to_hub and hub_name is None:
             raise ValueError("hub_name must be provided if push_to_hub is True")
 
-        # Collect columns to include
-        cols = self._collect_dataset_columns(results, state_columns, extra_columns)
-        
-        # Process data for each column
-        dataset_data = {}
-        all_images = []
-        
-        for col in cols:
-            if col not in results:
-                continue
-                
-            if col in ["prompt", "completion"]:
-                # Process message columns with image extraction
-                dataset_data[col], images = self._process_message_column(results[col], all_images)
-                all_images = images
-            else:
-                # Process regular columns
-                dataset_data[col] = self._process_regular_column(results[col])
-        
-        # Add images if any were extracted
-        if all_images and any(imgs for imgs in all_images):
-            dataset_data["images"] = all_images
-        
-        # Create dataset
-        dataset = Dataset.from_dict(dataset_data)
+        cols = ["prompt", "completion", "answer", "info", "task", "reward"]
+
+        results_dict = {
+            "prompt": results.prompt,
+            "completion": [],
+            "answer": results.answer,
+            "info": results.info,
+            "task": results.task,
+            "reward": results.reward,
+        }
+        for i in range(len(results.completion)):
+            results_dict["completion"].append(
+                self._sanitize_tool_calls(results.completion[i])
+            )
+        results_dict.update(results.metrics)
+        if results.state[0] is not None:
+            for col in state_columns:
+                if col in results.state[0]:
+                    results_dict[col] = [state[col] for state in results.state]
+                    cols.append(col)
+                else:
+                    self.logger.warning(
+                        f"Column {col} not found in state, skipping from dataset."
+                    )
+        dataset = Dataset.from_dict({col: results_dict[col] for col in cols})
         if push_to_hub:
             assert hub_name is not None
             dataset.push_to_hub(hub_name)
         return dataset
-    
-    def _collect_dataset_columns(self, results: GenerateOutputs, state_columns: List[str], extra_columns: List[str]) -> List[str]:
-        """Determine which columns to include in the dataset."""
-        cols = ["prompt", "completion", "answer", "reward"]
-        
-        # Add task column if present
-        if "task" in results and results["task"][0] is not None:
-            cols.append("task")
-        
-        # Extract columns from state
-        if "state" in results and results["state"]:
-            for col in state_columns:
-                if col in results["state"][0]:
-                    # Extract from state dict into results
-                    results[col] = [state[col] for state in results["state"]]
-                    cols.append(col)
-                else:
-                    self.logger.warning(f"Column {col} not found in state, skipping from dataset.")
-        
-        # Add extra columns
-        for col in extra_columns:
-            if col in results:
-                cols.append(col)
-            else:
-                self.logger.warning(f"Column {col} not found in results, skipping from dataset.")
-        
-        return cols
-    
-    def _process_message_column(self, messages: List[Messages], all_images: List[List[Image.Image]]) -> Tuple[List[Messages], List[List[Image.Image]]]:
-        """Process a column of messages, normalizing content and extracting images."""
-        normalized_messages = []
-        
-        for i, msg_list in enumerate(messages):
-            # Ensure image list exists for this example
-            if len(all_images) <= i:
-                all_images.append([])
-            
-            if not isinstance(msg_list, list):
-                normalized_messages.append(msg_list)
-                continue
-            
-            # Process each message in the list
-            normalized_list = []
-            for msg in msg_list:
-                if isinstance(msg, dict) and "content" in msg:
-                    normalized_msg = self._normalize_message(msg, all_images[i])
-                    normalized_list.append(normalized_msg)
-                else:
-                    normalized_list.append(msg)
-            
-            normalized_messages.append(normalized_list)
-        
-        return normalized_messages, all_images
-    
-    def _normalize_message(self, msg: ChatMessage, image_list: List[Image.Image]) -> ChatMessage:
-        """Normalize a single message, converting content to list format and extracting images."""
-        normalized_msg = msg.copy()
-        content = msg["content"]
-        
-        if isinstance(content, list):
-            # Process multimodal content
-            new_content = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        new_content.append(item)
-                    elif item.get("type") == "image_url":
-                        # Replace with placeholder and extract image
-                        new_content.append({"type": "image"})
-                        img = self._extract_image(item)
-                        image_list.append(img)
-                else:
-                    new_content.append(item)
-            normalized_msg["content"] = new_content
-        elif isinstance(content, str):
-            # Convert string to list format
-            normalized_msg["content"] = [{"type": "text", "text": content}]
-        else:
-            # Fallback for other types
-            normalized_msg["content"] = [{"type": "text", "text": str(content)}]
-        
-        return normalized_msg
-    
-    def _extract_image(self, item: Dict[str, Any]) -> Optional[Image.Image]:
-        """Extract and convert base64 image URL to PIL Image."""
-        image_url = item.get("image_url", {}).get("url", "")
-        if not image_url or not image_url.startswith("data:image"):
-            return None
-        
-        try:
-            # Extract base64 data after comma
-            base64_str = image_url.split(",", 1)[1] if "," in image_url else ""
-            if base64_str:
-                img_data = base64.b64decode(base64_str)
-                return Image.open(io.BytesIO(img_data))
-        except Exception as e:
-            self.logger.warning(f"Failed to convert image: {e}")
-        
-        return None
-    
-    def _process_regular_column(self, value: Any) -> Any:
-        """Process non-message columns, converting to list if needed."""
-        if hasattr(value, '__iter__') and not isinstance(value, str):
-            return list(value)
-        return value

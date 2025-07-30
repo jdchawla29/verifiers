@@ -300,7 +300,7 @@ class AsyncBatchGenerator:
         else:
             processed_results = self.env.process_env_results(
                 prompts=env_results.prompt,
-                images=env_results.get("images"),  # May be None for text-only tasks
+                images=env_results.images,  # May be None for text-only tasks
                 completions=env_results.completion,
                 states=env_results.state,
                 rewards=env_results.reward,

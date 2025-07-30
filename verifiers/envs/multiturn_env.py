@@ -84,6 +84,7 @@ class MultiTurnEnv(Environment):
                 oai_tools=info.get("oai_tools", None),
                 sampling_args=sampling_args,
                 message_type=self.message_type,
+                images=kwargs.get("images"),
             )
             state["responses"].append(response)
             if self.message_type == "chat":

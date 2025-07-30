@@ -1,9 +1,10 @@
 """Tests for the base Environment class."""
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
 from datasets import Dataset
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from verifiers import Environment, Parser, Rubric
 from verifiers.types import GenerateOutputs, RolloutScores
@@ -322,7 +323,7 @@ class TestEnvironmentBase:
         assert hasattr(results, "completion_mask")
         assert hasattr(results, "completion_logprobs")
         assert hasattr(results, "rewards")
-        assert "remaining_inputs" in results
+        assert hasattr(results, "remaining_inputs")
         assert len(results.rewards) == 1
         assert results.rewards[0] == 1.0
 

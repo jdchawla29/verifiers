@@ -134,11 +134,13 @@ class Environment(ABC):
 
         # Apply data collator if provided
         if self.data_collator is not None and self.eval_dataset is not None:
-            processed_dataset = self.data_collator(list(self.eval_dataset))
+            # Convert dataset samples to plain dicts to avoid pickling issues
+            dataset_as_dicts = [dict(sample) for sample in self.eval_dataset]
+            processed_dataset = self.data_collator(dataset_as_dicts)
             if not processed_dataset:
                 self.eval_dataset = {}
             else:
-                keys = processed_dataset[0].keys()
+                keys = list(processed_dataset[0].keys())
                 self.eval_dataset = {key: [sample.get(key) for sample in processed_dataset] for key in keys}
 
         self.parser = parser
@@ -262,6 +264,13 @@ class Environment(ABC):
 
             if message_type == "chat":
                 assert isinstance(prompt, list)
+                # Check if there are images to format
+                images = kwargs.get("images")
+                if images:
+                    # Format multimodal messages
+                    formatted_prompts = format_oai_chat_msg([prompt], [images])
+                    prompt = formatted_prompts[0]
+                
                 if oai_tools:
                     response = await client.chat.completions.create(
                         model=model,
@@ -338,6 +347,7 @@ class Environment(ABC):
         infos: List[Info] = [],
         sampling_args: SamplingArgs = {},
         max_concurrent: int = -1,
+        images: Optional[List[List[Any]]] = None,
         **kwargs,
     ) -> List[Tuple[Messages, State]]:
         """
@@ -345,6 +355,10 @@ class Environment(ABC):
         """
         from tqdm.asyncio import tqdm_asyncio
 
+        # Handle images
+        if images is None:
+            images = [None] * len(prompts)
+        
         if max_concurrent > 0:
             semaphore = asyncio.Semaphore(max_concurrent)
             rollout_tasks = [
@@ -357,16 +371,17 @@ class Environment(ABC):
                     task,
                     info,
                     sampling_args,
+                    images=img,
                     **kwargs,
                 )
-                for prompt, answer, task, info in zip(prompts, answers, tasks, infos)
+                for prompt, answer, task, info, img in zip(prompts, answers, tasks, infos, images)
             ]
         else:
             rollout_tasks = [
                 self.rollout(
-                    client, model, prompt, answer, task, info, sampling_args, **kwargs
+                    client, model, prompt, answer, task, info, sampling_args, images=img, **kwargs
                 )
-                for prompt, answer, task, info in zip(prompts, answers, tasks, infos)
+                for prompt, answer, task, info, img in zip(prompts, answers, tasks, infos, images)
             ]
         return await tqdm_asyncio.gather(
             *rollout_tasks, total=len(prompts), desc=f"Running {len(prompts)} rollouts"
@@ -436,6 +451,7 @@ class Environment(ABC):
             state=[],
             reward=[],
             metrics={},
+            images=results_dict.get("images"),
         )
         rollouts = await self.run_rollouts(
             prompts=results.prompt,
@@ -446,6 +462,7 @@ class Environment(ABC):
             model=model,
             sampling_args=gen_sampling_args,
             max_concurrent=max_concurrent,
+            images=results.images,
             **kwargs,
         )
         results.completion = [rollout[0] for rollout in rollouts]

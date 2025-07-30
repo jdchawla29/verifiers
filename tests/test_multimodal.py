@@ -203,12 +203,12 @@ class TestMultimodalEnvironment:
         )
         
         # Check outputs
-        assert "prompt_ids" in results
-        assert "completion_ids" in results
-        assert "remaining_inputs" in results
-        assert len(results["remaining_inputs"]) == 1
+        assert hasattr(results, "prompt_ids")
+        assert hasattr(results, "completion_ids")
+        assert hasattr(results, "remaining_inputs")
+        assert len(results.remaining_inputs) == 1
         # The processor returns pixel_values, not images
-        assert "pixel_values" in results["remaining_inputs"][0]
+        assert "pixel_values" in results.remaining_inputs[0]
 
 
 # Skip trainer tests for now - the existing test suite doesn't test trainers
@@ -223,18 +223,30 @@ class TestAsyncBatchGeneratorMultimodal:
     @pytest.fixture
     def mock_env_multimodal(self):
         """Create a mock environment with multimodal support."""
+        from verifiers.types import GenerateOutputs
         env = Mock()
-        env.a_generate = AsyncMock(return_value={
-            "prompt": [[{"role": "user", "content": "test"}]],
-            "images": [[Image.new('RGB', (10, 10), color='red')]],
-            "completion": [[{"role": "assistant", "content": "response"}]],
-            "state": [{}],
-            "reward": [1.0]
-        })
-        env.process_env_results = Mock(return_value={
-            "prompt_ids": [[1, 2, 3]],
-            "remaining_inputs": [{"images": [Image.new('RGB', (10, 10), color='red')]}]
-        })
+        env.a_generate = AsyncMock(return_value=GenerateOutputs(
+            prompt=[[{"role": "user", "content": "test"}]],
+            answer=[""],
+            task=["default"],
+            info=[{}],
+            completion=[[{"role": "assistant", "content": "response"}]],
+            state=[{}],
+            reward=[1.0],
+            metrics={}
+        ))
+        from verifiers.types import ProcessedOutputs
+        processed_output = ProcessedOutputs(
+            prompt_ids=[[1, 2, 3]],
+            prompt_mask=[[0, 0, 0]],
+            completion_ids=[[4, 5, 6]],
+            completion_mask=[[1, 1, 1]],
+            completion_logprobs=[[0.0, 0.0, 0.0]],
+            rewards=[1.0],
+            remaining_inputs=[{"images": [Image.new('RGB', (10, 10), color='red')]}]
+        )
+        env.process_env_results = Mock(return_value=processed_output)
+        env.process_env_results_vllm = Mock(return_value=processed_output)
         return env
     
     @pytest.mark.asyncio
@@ -274,9 +286,9 @@ class TestAsyncBatchGeneratorMultimodal:
         
         # Check result
         assert result.batch_id == 0
-        assert "remaining_inputs" in result.processed_results
-        assert len(result.processed_results["remaining_inputs"]) == 1
-        assert "images" in result.processed_results["remaining_inputs"][0]
+        assert hasattr(result.processed_results, "remaining_inputs")
+        assert len(result.processed_results.remaining_inputs) == 1
+        assert "images" in result.processed_results.remaining_inputs[0]
 
 
 class TestMultimodalIntegration:
@@ -354,14 +366,16 @@ class TestMultimodalIntegration:
                     {"type": "image"}  # Placeholder for image
                 ]
                 sample["prompt"] = [{"role": "user", "content": content}]
-                sample["images"] = [Image.new('RGB', (10, 10), color='red')]
+                # Create a simple PIL image
+                img = Image.new('RGB', (10, 10), color='red')
+                sample["images"] = [img]
                 processed.append(sample)
             return processed
         
         # Create dataset
         base_dataset = Dataset.from_dict({
             "question": ["What color is this?"],
-            "answer": [["red"]]
+            "answer": ["red"]
         })
         
         # Create environment with data collator
@@ -375,6 +389,19 @@ class TestMultimodalIntegration:
         
         # Run generation on eval dataset (which has data_collator applied)
         test_input = env.get_eval_dataset(n=1)
+        
+        # Debug: Check what test_input looks like
+        print(f"test_input type: {type(test_input)}")
+        if isinstance(test_input, dict):
+            print(f"test_input keys: {test_input.keys()}")
+            for key, value in test_input.items():
+                print(f"  {key}: type={type(value)}, len={len(value) if hasattr(value, '__len__') else 'N/A'}")
+                if key == "prompt" and value:
+                    print(f"    First prompt: {value[0]}")
+                if key == "images" and value:
+                    print(f"    First images: {value[0]}")
+                    print(f"    Image type: {type(value[0][0]) if value[0] else 'None'}")
+        
         results = await env.a_generate(
             test_input,
             client=mock_openai_client,
@@ -382,9 +409,9 @@ class TestMultimodalIntegration:
         )
         
         # Check results
-        assert "completion" in results
-        assert len(results["completion"]) == 1
-        assert results["completion"][0][0]["content"] == "It's a red square"
+        assert hasattr(results, "completion")
+        assert len(results.completion) == 1
+        assert results.completion[0][0]["content"] == "It's a red square"
         
         # Verify that the client was called
         mock_openai_client.chat.completions.create.assert_called_once()

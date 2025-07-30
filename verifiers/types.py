@@ -7,10 +7,11 @@ from typing import (
     Optional,
     Union,
 )
+from typing import Annotated
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message_param import (
-    ChatCompletionMessageParam as ChatMessage,
+    ChatCompletionMessageParam,
 )
 from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,  # noqa: F401
@@ -24,13 +25,16 @@ from openai.types.shared_params import (  # noqa: F401
     FunctionDefinition,
     FunctionParameters,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, SkipValidation
 
 # typing aliases
 MessageType = Literal["chat", "completion"]
 ModelResponse = Union[Completion, ChatCompletion, None]
 
 
+# Use the OpenAI type with SkipValidation to avoid pydantic ValidatorIterator issues
+# This maintains type safety while allowing multimodal messages to work properly
+ChatMessage = Annotated[ChatCompletionMessageParam, SkipValidation]
 Message = Union[str, ChatMessage]
 Messages = Union[str, List[ChatMessage]]
 Info = Dict[str, Any]
@@ -63,6 +67,7 @@ class GenerateOutputs(BaseModel):
     task: List[str]
     reward: List[float]
     metrics: Dict[str, List[float]] = {}
+    images: Optional[List[List[Any]]] = None
 
 
 class RolloutScore(BaseModel):

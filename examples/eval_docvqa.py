@@ -1,6 +1,9 @@
 """
 Example evaluation script for DocVQA environment.
 
+First install the environment:
+    uv run vf-install vf-docvqa
+
 For API evaluation:
     export OPENAI_API_KEY="your-api-key"
     uv run python examples/eval_docvqa.py
@@ -9,18 +12,13 @@ For local model evaluation:
     # Start vLLM server with a multimodal model
     CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model 'Qwen/Qwen2-VL-2B-Instruct' --max-model-len 32768
     # Run evaluation
-    uv run python examples/eval_docvqa.py
+    uv run examples/eval_docvqa.py
 """
 
 import logging
 import os
 from openai import AsyncOpenAI
 import verifiers as vf
-
-# Import the environment
-import sys
-sys.path.append('environments/vf_docvqa')
-from vf_docvqa import load_environment
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -33,8 +31,8 @@ def main():
     EVAL_NUM_EXAMPLES = 5  # Number of examples to evaluate
     
     # Load environment
-    vf_env = load_environment(num_eval_examples=EVAL_NUM_EXAMPLES)
-    
+    vf_env = vf.load_environment("vf-docvqa", num_eval_examples=EVAL_NUM_EXAMPLES)
+
     # Set up client and model based on API type
     if API_TYPE == "vllm":
         # vLLM API configuration

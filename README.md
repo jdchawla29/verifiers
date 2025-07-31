@@ -14,6 +14,8 @@ Environments for LLM Reinforcement Learning
 
 Verifiers is a library of modular components for creating RL environments and training LLM agents. Verifiers includes an async GRPO implementation built around the `transformers` Trainer, is supported by `prime-rl` for large-scale FSDP training, and can easily be integrated into any RL framework which exposes an OpenAI-compatible inference client. In addition to RL training, Verifiers can be used directly for building LLM evaluations, creating synthetic data pipelines, and implementing agent harnesses.
 
+Full documentation is available [here](https://verifiers.readthedocs.io/en/latest/). 
+
 ## Setup
 
 We recommend using `verifiers` with along [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management in your own project:
@@ -191,16 +193,16 @@ The included trainer (`vf.GRPOTrainer`) supports running GRPO-style RL training 
 
 ```bash
 # install environment
-vf-install wordle (-p /path/to/environments | --from-repo)
+vf-install vf-wordle (-p /path/to/environments | --from-repo)
 
 # quick eval
-vf-eval wordle -m (model_name in endpoints.py)
+vf-eval vf-wordle -m (model_name in configs/endpoints.py) -n NUM_EXAMPLES -r ROLLOUTS_PER_EXAMPLE
 
-# inference
+# inference (shell 0)
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 vf-vllm --model willcb/Qwen3-1.7B-Wordle \
     --data-parallel-size 7 --enforce-eager --disable-log-requests
 
-# training
+# training (shell 1)
 CUDA_VISIBLE_DEVICES=6,7 accelerate launch --num-processes 2 \
     --config-file configs/zero3.yaml examples/grpo/train_wordle.py --size 1.7B
 ```

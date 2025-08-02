@@ -406,13 +406,13 @@ class GRPOTrainer(Trainer):
                 # Tokenize prompt to check length
                 if isinstance(prompt, list):
                     # Chat format
-                    prompt_text = processing_class.apply_chat_template(
+                    prompt_text = self.processor_wrapper.apply_chat_template(
                         prompt, tokenize=False, add_generation_prompt=True
                     )
                 else:
                     # Completion format
                     prompt_text = prompt
-                prompt_ids = self.processor_wrapper.encode(prompt_text)
+                prompt_ids = self.processor_wrapper.encode(prompt_text)  # type: ignore
                 return len(prompt_ids) <= max_length
 
             original_size = len(train_dataset)
@@ -1079,15 +1079,15 @@ class GRPOTrainer(Trainer):
 
                 # Package raw data for broadcast (not tensors yet)
                 broadcast_data = {
-                    "prompt_ids": processed_results["prompt_ids"],
-                    "prompt_mask": processed_results["prompt_mask"],
-                    "completion_ids": processed_results["completion_ids"],
-                    "completion_mask": processed_results["completion_mask"],
-                    "rewards": processed_results["rewards"],
-                    "remaining_inputs": processed_results["remaining_inputs"],
+                    "prompt_ids": processed_results.prompt_ids,
+                    "prompt_mask": processed_results.prompt_mask,
+                    "completion_ids": processed_results.completion_ids,
+                    "completion_mask": processed_results.completion_mask,
+                    "rewards": processed_results.rewards,
+                    "remaining_inputs": processed_results.remaining_inputs,
                     "all_reward_dict": batch_result.all_reward_dict
                     if hasattr(batch_result, "all_reward_dict")
-                    else {"reward": processed_results["rewards"]},
+                    else {"reward": processed_results.rewards},
                     "completions": batch_result.completions
                     if hasattr(batch_result, "completions")
                     else [],
@@ -1145,9 +1145,9 @@ class GRPOTrainer(Trainer):
 
             input_ids = pad(
                 input_ids_list,
-                padding_value=pad_token_id,
+                padding_value=pad_token_id,  # type: ignore
                 padding_side="right",
-            )  # type: ignore
+            )
             attention_mask = pad(attention_mask_list, padding_side="right")  # type: ignore
             # Truncate if needed
             if self.max_seq_len is not None and input_ids.size(1) > self.max_seq_len:
@@ -1491,14 +1491,19 @@ class GRPOTrainer(Trainer):
                 prompt = []
                 if prompts:
                     for messages in prompts:
-                        last_message = messages[-1]
-                        content = last_message.get("content", "")
-                        content = (
-                            MultimodalHandler.extract_text_from_multimodal_content(
-                                content
+                        if isinstance(messages, str):
+                            # Completion format
+                            prompt.append([{"role": "user", "content": messages}])
+                        else:
+                            # Chat format
+                            last_message = messages[-1]
+                            content = last_message.get("content", "")
+                            content = (
+                                MultimodalHandler.extract_text_from_multimodal_content(
+                                    content
+                                )
                             )
-                        )
-                        prompt.append([{"role": "user", "content": content}])
+                            prompt.append([{"role": "user", "content": content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
                     "prompt": prompts,
@@ -1557,14 +1562,19 @@ class GRPOTrainer(Trainer):
                 prompt = []
                 if list(self._textual_logs["prompt"]):
                     for messages in list(self._textual_logs["prompt"]):
-                        last_message = messages[-1]
-                        content = last_message.get("content", "")
-                        content = (
-                            MultimodalHandler.extract_text_from_multimodal_content(
-                                content
+                        if isinstance(messages, str):
+                            # Completion format
+                            prompt.append([{"role": "user", "content": messages}])
+                        else:
+                            # Chat format
+                            last_message = messages[-1]
+                            content = last_message.get("content", "")
+                            content = (
+                                MultimodalHandler.extract_text_from_multimodal_content(
+                                    content
+                                )
                             )
-                        )
-                        prompt.append([{"role": "user", "content": content}])
+                            prompt.append([{"role": "user", "content": content}])
                 table = {
                     "step": [str(self.state.global_step)]
                     * len(self._textual_logs["prompt"]),

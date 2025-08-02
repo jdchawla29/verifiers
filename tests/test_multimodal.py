@@ -320,21 +320,27 @@ class TestMultimodalIntegration:
         """Test a data collator workflow similar to docvqa example."""
 
         def data_collator(batch):
-            processed = []
-            for sample in batch:
+            # Handle batched format from dataset.map()
+            prompts = []
+            images = []
+
+            for i in range(len(batch["question"])):
                 # Create multimodal prompt format with image placeholders
                 content_block = []
-                content_block.append({"type": "text", "text": sample["question"]})
+                content_block.append({"type": "text", "text": batch["question"][i]})
                 content_block.append({"type": "image"})  # Image placeholder
 
                 # Format the prompt with multimodal content
-                sample["prompt"] = [{"role": "user", "content": content_block}]
+                prompts.append([{"role": "user", "content": content_block}])
 
                 # Add the actual images
-                sample["images"] = [Image.new("RGB", (10, 10), color="red")]
+                images.append([Image.new("RGB", (10, 10), color="red")])
 
-                processed.append(sample)
-            return processed
+            # Return updated batch dict
+            result = dict(batch)
+            result["prompt"] = prompts
+            result["images"] = images
+            return result
 
         # Create datasets
         train_dataset = Dataset.from_dict(
@@ -361,9 +367,9 @@ class TestMultimodalIntegration:
         )
 
         # Check that data collator was applied to the eval_dataset
-        # The eval_dataset should now have images
-        assert "images" in env.eval_dataset
-        assert len(env.eval_dataset["images"]) == 2
+        # The eval_dataset should now have images column
+        assert "images" in env.eval_dataset.column_names
+        assert len(env.eval_dataset) == 2
 
         # Verify the images were added correctly
         assert len(env.eval_dataset["images"][0]) == 1
@@ -377,19 +383,26 @@ class TestMultimodalIntegration:
 
         # Create a data collator that formats prompts for multimodal
         def multimodal_collator(batch):
-            processed = []
-            for sample in batch:
+            # Handle batched format from dataset.map()
+            prompts = []
+            images = []
+
+            for i in range(len(batch["question"])):
                 # Create multimodal content structure
                 content = [
-                    {"type": "text", "text": sample["question"]},
+                    {"type": "text", "text": batch["question"][i]},
                     {"type": "image"},  # Placeholder for image
                 ]
-                sample["prompt"] = [{"role": "user", "content": content}]
+                prompts.append([{"role": "user", "content": content}])
                 # Create a simple PIL image
                 img = Image.new("RGB", (10, 10), color="red")
-                sample["images"] = [img]
-                processed.append(sample)
-            return processed
+                images.append([img])
+
+            # Return updated batch dict
+            result = dict(batch)
+            result["prompt"] = prompts
+            result["images"] = images
+            return result
 
         # Create dataset
         base_dataset = Dataset.from_dict(
@@ -407,22 +420,6 @@ class TestMultimodalIntegration:
 
         # Run generation on eval dataset (which has data_collator applied)
         test_input = env.get_eval_dataset(n=1)
-
-        # Debug: Check what test_input looks like
-        print(f"test_input type: {type(test_input)}")
-        if isinstance(test_input, dict):
-            print(f"test_input keys: {test_input.keys()}")
-            for key, value in test_input.items():
-                print(
-                    f"  {key}: type={type(value)}, len={len(value) if hasattr(value, '__len__') else 'N/A'}"
-                )
-                if key == "prompt" and value:
-                    print(f"    First prompt: {value[0]}")
-                if key == "images" and value:
-                    print(f"    First images: {value[0]}")
-                    print(
-                        f"    Image type: {type(value[0][0]) if value[0] else 'None'}"
-                    )
 
         results = await env.a_generate(
             test_input, client=mock_openai_client, model="test-model"

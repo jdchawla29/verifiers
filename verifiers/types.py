@@ -26,6 +26,7 @@ from openai.types.shared_params import (  # noqa: F401
     FunctionParameters,
 )
 from pydantic import BaseModel, SkipValidation
+from PIL import Image
 
 # typing aliases
 MessageType = Literal["chat", "completion"]
@@ -67,7 +68,7 @@ class GenerateOutputs(BaseModel):
     task: List[str]
     reward: List[float]
     metrics: Dict[str, List[float]] = {}
-    images: Optional[List[List[Any]]] = None
+    images: Optional[List[List[Image.Image]]] = None
 
 
 class RolloutScore(BaseModel):

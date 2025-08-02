@@ -32,16 +32,23 @@ Respond in the following format:
 
     # Data collator for multimodal inputs
     def data_collator(batch):
-        """Format data for multimodal models - images are passed separately."""
-        processed_samples = []
-        for sample in batch:
+        """Format data for multimodal models - images are passed separately.
+
+        When used with dataset.map(batched=True), batch is a dict with lists of values.
+        Returns a dict with the same structure.
+        """
+        prompts = []
+        images = []
+        answers = []
+
+        for i in range(len(batch["question"])):
             # Create multimodal prompt with image placeholder
             messages = [
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": sample["question"]},
+                        {"type": "text", "text": batch["question"][i]},
                         {
                             "type": "image"
                         },  # Placeholder - actual image handled by format_oai_chat_msg
@@ -49,17 +56,21 @@ Respond in the following format:
                 },
             ]
 
-            sample["prompt"] = messages
-            sample["images"] = [sample["image"]]  # Single image per question
+            prompts.append(messages)
+            images.append([batch["image"][i]])  # Single image per question
+
             # Convert list of answers to a single string for compatibility
-            # The rubric will still handle it as a list for matching
-            sample["answer"] = (
-                "|".join(sample["answers"])
-                if isinstance(sample["answers"], list)
-                else sample["answers"]
-            )
-            processed_samples.append(sample)
-        return processed_samples
+            answer = batch["answers"][i]
+            if isinstance(answer, list):
+                answer = "|".join(answer)
+            answers.append(answer)
+
+        # Return updated batch dict
+        result = dict(batch)  # Copy all existing columns
+        result["prompt"] = prompts
+        result["images"] = images
+        result["answer"] = answers
+        return result
 
     # Rubric with format checking and flexible answer matching
     def answer_match_reward(completion, answer, **kwargs):

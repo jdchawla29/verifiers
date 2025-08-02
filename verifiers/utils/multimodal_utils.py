@@ -29,7 +29,7 @@ class MultimodalHandler:
 
     @staticmethod
     def format_openai_messages(
-        prompts: List[List[Dict[str, Any]]], images: List[List[Image.Image]]
+        prompts: List[List[Any]], images: List[List[Image.Image]]
     ) -> List[Any]:
         """Format multimodal chat messages for OpenAI API.
 
@@ -104,7 +104,7 @@ class MultimodalHandler:
     @staticmethod
     def extract_images_from_batch(
         batch: List[Dict[str, Any]],
-    ) -> Optional[List[List[Any]]]:
+    ) -> Optional[List[List[Image.Image]]]:
         """Extract images from a batch if present.
 
         Args:

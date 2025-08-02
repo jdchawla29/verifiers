@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
+from PIL import Image
 
 from verifiers.parsers.parser import Parser
 from verifiers.rubrics.rubric import Rubric
@@ -87,17 +88,12 @@ class Environment(ABC):
 
         # Apply data collator if provided
         if self.data_collator is not None and self.eval_dataset is not None:
-            # Convert dataset samples to plain dicts to avoid pickling issues
-            dataset_as_dicts = [dict(sample) for sample in self.eval_dataset]
-            processed_dataset = self.data_collator(dataset_as_dicts)
-            if not processed_dataset:
-                self.eval_dataset = {}
-            else:
-                keys = list(processed_dataset[0].keys())
-                self.eval_dataset = {
-                    key: [sample.get(key) for sample in processed_dataset]
-                    for key in keys
-                }
+            self.eval_dataset = self.eval_dataset.map(
+                self.data_collator,
+                batched=True,
+                batch_size=len(self.eval_dataset),
+                remove_columns=[],
+            )
 
         self.parser = parser
         self.rubric = rubric
@@ -176,22 +172,16 @@ class Environment(ABC):
 
     def get_eval_dataset(
         self, n: int = -1, seed: int | None = None, **kwargs
-    ) -> Dataset | dict[Any, list[Any]] | None:
+    ) -> Dataset | None:
         if self.eval_dataset is None:
             self.logger.warning(
                 "eval_dataset is not set, falling back to train dataset"
             )
             return self.get_dataset(n, seed, **kwargs)
-        if isinstance(self.eval_dataset, Dataset):
-            if seed is not None:
-                self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
-            if n > 0:
-                return self.eval_dataset.select(range(n))
-        elif isinstance(self.eval_dataset, dict) and n > 0:
-            # Handle dict format for data collator output
-            return {
-                key: value_list[:n] for key, value_list in self.eval_dataset.items()
-            }
+        if seed is not None:
+            self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
+        if n > 0:
+            return self.eval_dataset.select(range(n))
         return self.eval_dataset
 
     def get_reward_funcs(self) -> List[RewardFunc]:
@@ -307,7 +297,7 @@ class Environment(ABC):
         infos: List[Info] = [],
         sampling_args: SamplingArgs = {},
         max_concurrent: int = -1,
-        images: Optional[List[List[Any]]] = None,
+        images: Optional[List[List[Image.Image]]] = None,
         **kwargs,
     ) -> List[Tuple[Messages, State]]:
         """
@@ -317,7 +307,9 @@ class Environment(ABC):
 
         # Handle images
         if images is None:
-            images = [None] * len(prompts)
+            images_list = [[] for _ in range(len(prompts))]
+        else:
+            images_list = images
 
         if max_concurrent > 0:
             semaphore = asyncio.Semaphore(max_concurrent)
@@ -335,7 +327,7 @@ class Environment(ABC):
                     **kwargs,
                 )
                 for prompt, answer, task, info, img in zip(
-                    prompts, answers, tasks, infos, images
+                    prompts, answers, tasks, infos, images_list
                 )
             ]
         else:
@@ -352,7 +344,7 @@ class Environment(ABC):
                     **kwargs,
                 )
                 for prompt, answer, task, info, img in zip(
-                    prompts, answers, tasks, infos, images
+                    prompts, answers, tasks, infos, images_list
                 )
             ]
         return await tqdm_asyncio.gather(
@@ -501,7 +493,7 @@ class Environment(ABC):
     def process_chat_format(
         self,
         prompt: List[ChatMessage],
-        images: Optional[List[List[Any]]],
+        images: Optional[List[Image.Image]],
         completion: List[ChatMessage],
         processing_class: Any,
         mask_env_responses: bool = False,
@@ -517,8 +509,6 @@ class Environment(ABC):
         Returns:
             prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs
         """
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
         completion_ids = []
         completion_mask = []
         remaining_inputs = {}
@@ -680,7 +670,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
     def process_env_results(
         self,
         prompts: List[Messages],
-        images: Optional[List[List[Any]]],
+        images: Optional[List[List[Image.Image]]],
         completions: List[Messages],
         states: List[State],
         rewards: List[float],
@@ -979,6 +969,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             completion_mask=all_completion_masks,
             completion_logprobs=all_completion_logprobs,
             rewards=all_rewards,
+            remaining_inputs=[],
         )
 
     # Evaluation and dataset generation
@@ -1004,14 +995,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             inputs = self.get_eval_dataset(n=num_examples)
         assert inputs is not None, "No dataset found"
         if rollouts_per_example > 1:
-            if isinstance(inputs, Dataset):
-                inputs = inputs.repeat(rollouts_per_example)
-            elif isinstance(inputs, dict):
-                # Handle dict format
-                inputs = {
-                    key: value_list * rollouts_per_example
-                    for key, value_list in inputs.items()
-                }
+            inputs = inputs.repeat(rollouts_per_example)
 
         results = self.generate(
             inputs,

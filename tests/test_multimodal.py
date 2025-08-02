@@ -7,7 +7,7 @@ import base64
 from datasets import Dataset
 
 from verifiers import SingleTurnEnv, Parser, Rubric
-from verifiers.envs.environment import _pil_to_data_url, format_oai_chat_msg
+from verifiers.utils.multimodal_utils import MultimodalHandler
 from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchRequest
 
 
@@ -78,7 +78,7 @@ class TestMultimodalUtils:
         img = Image.new("RGB", (10, 10), color="red")
 
         # Convert to data URL
-        data_url = _pil_to_data_url(img)
+        data_url = MultimodalHandler.pil_to_data_url(img)
 
         # Check format
         assert data_url.startswith("data:image/png;base64,")
@@ -89,10 +89,10 @@ class TestMultimodalUtils:
         assert len(decoded) > 0
 
         # Test with specific format
-        data_url_jpeg = _pil_to_data_url(img, fmt="JPEG")
+        data_url_jpeg = MultimodalHandler.pil_to_data_url(img, fmt="JPEG")
         assert data_url_jpeg.startswith("data:image/jpeg;base64,")
 
-    def test_format_oai_chat_msg(self):
+    def test_format_openai_messages(self):
         """Test formatting OpenAI-style chat messages with images."""
         # Create test data with multimodal content
         prompts = [
@@ -122,7 +122,7 @@ class TestMultimodalUtils:
         images = [[img1], [img2]]
 
         # Format messages
-        formatted = format_oai_chat_msg(prompts, images)
+        formatted = MultimodalHandler.format_openai_messages(prompts, images)
 
         # Check structure
         assert len(formatted) == 2
@@ -138,7 +138,7 @@ class TestMultimodalUtils:
             "data:image/png;base64,"
         )
 
-    def test_format_oai_chat_msg_text_only(self):
+    def test_format_openai_messages_text_only(self):
         """Test formatting text-only messages (no image placeholders)."""
         prompts = [
             [{"role": "user", "content": "Hello"}],
@@ -149,7 +149,7 @@ class TestMultimodalUtils:
         images = [[], []]
 
         # Should return prompts unchanged since no images to format
-        formatted = format_oai_chat_msg(prompts, images)
+        formatted = MultimodalHandler.format_openai_messages(prompts, images)
         assert formatted == prompts
 
 
@@ -311,8 +311,8 @@ class TestMultimodalIntegration:
     The multimodal flow in verifiers works as follows:
     1. Data collator transforms prompts to have content as a list with text and image placeholders
     2. Images are stored separately in the "images" column
-    3. When a_generate is called with a dataset containing images, format_oai_chat_msg is invoked
-    4. format_oai_chat_msg replaces image placeholders with base64-encoded data URLs
+    3. When a_generate is called with a dataset containing images, format_openai_messages is invoked
+    4. format_openai_messages replaces image placeholders with base64-encoded data URLs
     5. The formatted messages are sent to the API with proper multimodal structure
     """
 
@@ -449,7 +449,7 @@ class TestMultimodalIntegration:
         last_user_msg = user_messages[-1]
 
         # With the data collator, prompts should have multimodal format
-        # and when images are present, format_oai_chat_msg should be called
+        # and when images are present, format_openai_messages should be called
         if "images" in test_input and test_input["images"]:
             # Check if the content is properly formatted as multimodal
             assert isinstance(last_user_msg["content"], list), (

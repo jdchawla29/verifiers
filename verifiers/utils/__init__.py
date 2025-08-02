@@ -6,6 +6,8 @@ from .model_utils import (
     generic_model_loader,
 )
 from .logging_utils import setup_logging, print_prompt_completions_sample
+from .multimodal_utils import MultimodalHandler
+from .processor_utils import ProcessorWrapper
 
 __all__ = [
     "extract_boxed_answer",
@@ -17,4 +19,6 @@ __all__ = [
     "setup_logging",
     "print_prompt_completions_sample",
     "generic_model_loader",
+    "MultimodalHandler",
+    "ProcessorWrapper",
 ]

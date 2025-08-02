@@ -1,16 +1,13 @@
 import asyncio
 import json
-import base64
-import io
 import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
-from PIL import Image
 
 from verifiers.parsers.parser import Parser
 from verifiers.rubrics.rubric import Rubric
@@ -29,52 +26,10 @@ from verifiers.types import (
     SamplingArgs,
     State,
 )
+from verifiers.utils.multimodal_utils import MultimodalHandler
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-
-def _pil_to_data_url(img: Image.Image, fmt: str | None = None) -> str:
-    """Convert PIL Image to data URL for multimodal inputs."""
-    buf = io.BytesIO()
-    fmt = (fmt or img.format or "PNG").upper()
-    img.save(buf, format=fmt)
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/{fmt.lower()};base64,{b64}"
-
-
-def format_oai_chat_msg(
-    prompts: List[List[Dict[str, Any]]], images: List[List[Image.Image]]
-) -> List[Any]:
-    """Format multimodal chat messages for OpenAI API."""
-    formatted_conversations = []
-
-    for conv_prompts, conv_images in zip(prompts, images):
-        img_iter = iter(conv_images)
-        new_conv = []
-
-        for msg in conv_prompts:
-            role = msg["role"]
-            content = msg["content"]
-
-            if isinstance(content, list):
-                new_parts = []
-                for part in content:
-                    if part.get("type") == "image":
-                        img = next(img_iter)
-                        data_url = _pil_to_data_url(img)
-                        new_parts.append(
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        )
-                    else:
-                        new_parts.append(part.copy())
-                new_conv.append({"role": role, "content": new_parts})
-            else:
-                new_conv.append({"role": role, "content": content})
-
-        formatted_conversations.append(new_conv)
-
-    return formatted_conversations
 
 
 class Environment(ABC):
@@ -271,7 +226,9 @@ class Environment(ABC):
                 images = kwargs.get("images")
                 if images:
                     # Format multimodal messages
-                    formatted_prompts = format_oai_chat_msg([prompt], [images])
+                    formatted_prompts = MultimodalHandler.format_openai_messages(
+                        [prompt], [images]
+                    )
                     prompt = formatted_prompts[0]
 
                 if oai_tools:

@@ -81,7 +81,7 @@ def print_prompt_completions_sample(
             if prompt:
                 last_message = prompt[-1]
                 content = last_message.get("content", "")
-                if isinstance(content, list): # multimodal case
+                if isinstance(content, list):  # multimodal case
                     # Extract text from multimodal content
                     text_content = ""
                     for item in content:

@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
@@ -44,8 +44,7 @@ def _pil_to_data_url(img: Image.Image, fmt: str | None = None) -> str:
 
 
 def format_oai_chat_msg(
-    prompts: List[List[Dict[str, Any]]],
-    images: List[List[Image.Image]]
+    prompts: List[List[Dict[str, Any]]], images: List[List[Image.Image]]
 ) -> List[Any]:
     """Format multimodal chat messages for OpenAI API."""
     formatted_conversations = []
@@ -64,10 +63,9 @@ def format_oai_chat_msg(
                     if part.get("type") == "image":
                         img = next(img_iter)
                         data_url = _pil_to_data_url(img)
-                        new_parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": data_url}
-                        })
+                        new_parts.append(
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        )
                     else:
                         new_parts.append(part.copy())
                 new_conv.append({"role": role, "content": new_parts})
@@ -141,7 +139,10 @@ class Environment(ABC):
                 self.eval_dataset = {}
             else:
                 keys = list(processed_dataset[0].keys())
-                self.eval_dataset = {key: [sample.get(key) for sample in processed_dataset] for key in keys}
+                self.eval_dataset = {
+                    key: [sample.get(key) for sample in processed_dataset]
+                    for key in keys
+                }
 
         self.parser = parser
         self.rubric = rubric
@@ -233,7 +234,9 @@ class Environment(ABC):
                 return self.eval_dataset.select(range(n))
         elif isinstance(self.eval_dataset, dict) and n > 0:
             # Handle dict format for data collator output
-            return {key: value_list[:n] for key, value_list in self.eval_dataset.items()}
+            return {
+                key: value_list[:n] for key, value_list in self.eval_dataset.items()
+            }
         return self.eval_dataset
 
     def get_reward_funcs(self) -> List[RewardFunc]:
@@ -270,7 +273,7 @@ class Environment(ABC):
                     # Format multimodal messages
                     formatted_prompts = format_oai_chat_msg([prompt], [images])
                     prompt = formatted_prompts[0]
-                
+
                 if oai_tools:
                     response = await client.chat.completions.create(
                         model=model,
@@ -358,7 +361,7 @@ class Environment(ABC):
         # Handle images
         if images is None:
             images = [None] * len(prompts)
-        
+
         if max_concurrent > 0:
             semaphore = asyncio.Semaphore(max_concurrent)
             rollout_tasks = [
@@ -374,14 +377,26 @@ class Environment(ABC):
                     images=img,
                     **kwargs,
                 )
-                for prompt, answer, task, info, img in zip(prompts, answers, tasks, infos, images)
+                for prompt, answer, task, info, img in zip(
+                    prompts, answers, tasks, infos, images
+                )
             ]
         else:
             rollout_tasks = [
                 self.rollout(
-                    client, model, prompt, answer, task, info, sampling_args, images=img, **kwargs
+                    client,
+                    model,
+                    prompt,
+                    answer,
+                    task,
+                    info,
+                    sampling_args,
+                    images=img,
+                    **kwargs,
                 )
-                for prompt, answer, task, info, img in zip(prompts, answers, tasks, infos, images)
+                for prompt, answer, task, info, img in zip(
+                    prompts, answers, tasks, infos, images
+                )
             ]
         return await tqdm_asyncio.gather(
             *rollout_tasks, total=len(prompts), desc=f"Running {len(prompts)} rollouts"
@@ -554,9 +569,13 @@ class Environment(ABC):
         if images:
             # Handle multimodal case with processor
             assert not isinstance(processing_class, PreTrainedTokenizerBase)
-            prompt_text = processing_class.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            prompt_text = processing_class.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
             assert isinstance(prompt_text, str)
-            inputs = processing_class(text=prompt_text, images=images, return_tensors="pt")
+            inputs = processing_class(
+                text=prompt_text, images=images, return_tensors="pt"
+            )
             remaining_inputs = {
                 k: v
                 for k, v in inputs.items()
@@ -567,19 +586,29 @@ class Environment(ABC):
             prompt_mask = [0] * len(prompt_ids)
 
             for i, msg in enumerate(completion):
-                conversation_prefix = prompt + completion[:i+1]
+                conversation_prefix = prompt + completion[: i + 1]
                 prefix_text = processing_class.apply_chat_template(
-                    conversation_prefix, 
-                    tokenize=False, 
+                    conversation_prefix,
+                    tokenize=False,
                     add_generation_prompt=False,
                 )
-                assert isinstance(prefix_text, str), f"Expected string from apply_chat_template, got {type(prefix_text)}"
-                current_ids = processing_class(text=prefix_text, images=images, return_tensors="pt").input_ids[0].tolist()
-                assert current_ids[:len(prev_ids)-1] == prev_ids[:-1], (
-                    f"Tokenization difference in chat format. Current ids: {current_ids[:len(prev_ids)-1]}, previous ids: {prev_ids[:-1]}"
+                assert isinstance(prefix_text, str), (
+                    f"Expected string from apply_chat_template, got {type(prefix_text)}"
                 )
-                new_tokens = current_ids[len(prev_ids):]
-                assert len(new_tokens) > 0, f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
+                current_ids = (
+                    processing_class(
+                        text=prefix_text, images=images, return_tensors="pt"
+                    )
+                    .input_ids[0]
+                    .tolist()
+                )
+                assert current_ids[: len(prev_ids) - 1] == prev_ids[:-1], (
+                    f"Tokenization difference in chat format. Current ids: {current_ids[: len(prev_ids) - 1]}, previous ids: {prev_ids[:-1]}"
+                )
+                new_tokens = current_ids[len(prev_ids) :]
+                assert len(new_tokens) > 0, (
+                    f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
+                )
                 completion_ids.extend(new_tokens)
 
                 if msg["role"] == "assistant":
@@ -588,7 +617,7 @@ class Environment(ABC):
                     msg_mask = [0] * len(new_tokens)
                 else:
                     msg_mask = [1] * len(new_tokens)
-                
+
                 completion_mask.extend(msg_mask)
                 prev_ids = current_ids
         else:
@@ -603,33 +632,35 @@ class Environment(ABC):
             assert isinstance(prompt_text, str)
             prompt_ids = processing_class.encode(prompt_text)
             prompt_mask = [0] * len(prompt_ids)
-            
+
             # track completion tokens and masks by processing incrementally
             completion_ids = []
             completion_mask = []
-            
+
             # previous tokenization (starts with just prompt)
             prev_ids = prompt_ids
-            
+
             # process each completion message incrementally
             for i, msg in enumerate(completion):
                 # create conversation prefix: prompt + completion[:i+1]
-                conversation_prefix = prompt + completion[:i+1]
-                
+                conversation_prefix = prompt + completion[: i + 1]
+
                 # tokenize the full prefix
                 prefix_text = processing_class.apply_chat_template(
                     conversation_prefix,  # type: ignore
-                    tokenize=False, 
+                    tokenize=False,
                     add_generation_prompt=False,
                 )
-                assert isinstance(prefix_text, str), f"Expected string from apply_chat_template, got {type(prefix_text)}"
-                current_ids = processing_class.encode(prefix_text)
-                assert current_ids[:len(prev_ids)-1] == prev_ids[:-1], (
-                    f"Tokenization difference in chat format. Current ids: {current_ids[:len(prev_ids)-1]}, previous ids: {prev_ids[:-1]}"
+                assert isinstance(prefix_text, str), (
+                    f"Expected string from apply_chat_template, got {type(prefix_text)}"
                 )
-                
+                current_ids = processing_class.encode(prefix_text)
+                assert current_ids[: len(prev_ids) - 1] == prev_ids[:-1], (
+                    f"Tokenization difference in chat format. Current ids: {current_ids[: len(prev_ids) - 1]}, previous ids: {prev_ids[:-1]}"
+                )
+
                 # add new tokens to completion tokens
-                new_tokens = current_ids[len(prev_ids):] 
+                new_tokens = current_ids[len(prev_ids) :]
                 assert len(new_tokens) > 0, (
                     f"No new tokens in chat format. Current ids: {current_ids}, previous ids: {prev_ids}"
                 )
@@ -639,12 +670,12 @@ class Environment(ABC):
                 if msg["role"] == "assistant":
                     msg_mask = [1] * len(new_tokens)
                 elif msg["role"] != "assistant" and mask_env_responses:
-                    # mask intermediate 'user' and/or 'tool' messages 
+                    # mask intermediate 'user' and/or 'tool' messages
                     msg_mask = [0] * len(new_tokens)
                 else:
                     # default to not masking
                     msg_mask = [1] * len(new_tokens)
-                
+
                 completion_mask.extend(msg_mask)
                 # update previous tokenization for next iteration
                 prev_ids = current_ids
@@ -657,7 +688,13 @@ For Qwen3 models, you may want to replace the chat template with the Qwen2.5 cha
 Model copies with swapped templates are available here: https://huggingface.co/collections/willcb/qwen3-68434f4883925bfdb4570ee5"
                 )
 
-        return prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs
+        return (
+            prompt_ids,
+            prompt_mask,
+            completion_ids,
+            completion_mask,
+            remaining_inputs,
+        )
 
     def process_completion_format(
         self, prompt: str, completion: str, processing_class: "PreTrainedTokenizerBase"
@@ -721,14 +758,20 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             # Format-specific processing
             if is_chat_format:
                 assert isinstance(prompt, list) and isinstance(completion, list)
-                prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs = (
-                    self.process_chat_format(
-                        prompt, img, completion, processing_class, mask_env_responses
-                    )
+                (
+                    prompt_ids,
+                    prompt_mask,
+                    completion_ids,
+                    completion_mask,
+                    remaining_inputs,
+                ) = self.process_chat_format(
+                    prompt, img, completion, processing_class, mask_env_responses
                 )
             else:
                 if img is not None:
-                    raise NotImplementedError("Multi-modal training is not supported with completion formats yet")
+                    raise NotImplementedError(
+                        "Multi-modal training is not supported with completion formats yet"
+                    )
                 assert isinstance(prompt, str) and isinstance(completion, str)
                 prompt_ids, prompt_mask, completion_ids, completion_mask = (
                     self.process_completion_format(prompt, completion, processing_class)
@@ -951,7 +994,9 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                     prompt_mask = prompt_mask[:max_seq_len]
                 completion_ids = completion_ids[: max_seq_len - len(prompt_ids)]
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
-                completion_logprobs = completion_logprobs[: max_seq_len - len(prompt_ids)]
+                completion_logprobs = completion_logprobs[
+                    : max_seq_len - len(prompt_ids)
+                ]
                 is_truncated = True
             if is_truncated and mask_truncated_completions:
                 completion_mask = [0] * len(completion_ids)
@@ -1006,7 +1051,10 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                 inputs = inputs.repeat(rollouts_per_example)
             elif isinstance(inputs, dict):
                 # Handle dict format
-                inputs = {key: value_list * rollouts_per_example for key, value_list in inputs.items()}
+                inputs = {
+                    key: value_list * rollouts_per_example
+                    for key, value_list in inputs.items()
+                }
 
         results = self.generate(
             inputs,
@@ -1051,7 +1099,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
     ) -> Dataset:
         """
         Make a dataset from the evaluation results.
-        
+
         Normalizes multimodal messages and extracts images to a separate column.
         """
         if push_to_hub and hub_name is None:

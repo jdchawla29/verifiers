@@ -283,8 +283,8 @@ class AsyncBatchGenerator:
 
         # Process results
         # Check if we should use vLLM processing
-        if hasattr(self.env, 'process_env_results_vllm') and all(
-            'responses' in state for state in env_results.state if state
+        if hasattr(self.env, "process_env_results_vllm") and all(
+            "responses" in state for state in env_results.state if state
         ):
             processed_results = self.env.process_env_results_vllm(
                 prompts=env_results.prompt,

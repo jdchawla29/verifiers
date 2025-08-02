@@ -102,11 +102,10 @@ class MockAsyncOpenAI:
             self.default_chat_response = chat_response
         if text_response:
             self.default_text_response = text_response
-    
+
     def set_response(self, response):
         """Convenience method to set default chat response."""
         self.default_chat_response = response
-    
 
     async def _handle_chat_completion(self, messages, **kwargs):
         """Handle chat completion requests."""
@@ -182,7 +181,7 @@ class MockAsyncOpenAI:
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
-            
+
             # Handle multimodal content (list of content items)
             if isinstance(content, list):
                 content_str = ""
@@ -192,7 +191,7 @@ class MockAsyncOpenAI:
                     elif item.get("type") == "image_url":
                         content_str += "[IMAGE]"
                 content = content_str
-            
+
             key_parts.append(f"{role}:{content}")
         return tuple(key_parts)
 

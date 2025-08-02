@@ -279,10 +279,10 @@ class TestEnvironmentBase:
             parser=Parser(),
             rubric=Rubric(),
         )
-        
+
         # Create a mock tokenizer that passes isinstance check
         mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
-        
+
         # Track the conversation state
         def mock_apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=True
@@ -338,10 +338,10 @@ class TestEnvironmentBase:
             parser=Parser(),
             rubric=Rubric(),
         )
-        
+
         # Create a mock tokenizer that passes isinstance check
         mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
-        
+
         # Track the conversation state
         def mock_apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=True

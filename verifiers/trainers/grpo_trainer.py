@@ -746,9 +746,28 @@ class GRPOTrainer(Trainer):
                     # 1. Slice the list to get the tensors for this micro-batch
                     sub_list = value[i : i + batch_size]
                     # 2. Batch the tensors in the sub-list together
-                    model_kwargs_batch[key] = torch.cat(sub_list, dim=0).to(
-                        self.accelerator.device
-                    )
+                    # Handle different tensor types appropriately
+                    if key == "pixel_values" and len(sub_list) > 0:
+                        # For pixel_values, each item might have different shapes
+                        # Just pass them as a list if they can't be concatenated
+                        if all(
+                            isinstance(item, torch.Tensor)
+                            and item.shape == sub_list[0].shape
+                            for item in sub_list
+                        ):
+                            model_kwargs_batch[key] = torch.stack(sub_list, dim=0).to(
+                                self.accelerator.device
+                            )
+                        else:
+                            # Different shapes, pass as list
+                            model_kwargs_batch[key] = [
+                                item.to(self.accelerator.device) for item in sub_list
+                            ]
+                    else:
+                        # For other tensors, use standard concatenation
+                        model_kwargs_batch[key] = torch.cat(sub_list, dim=0).to(
+                            self.accelerator.device
+                        )
                 else:
                     # Handle non-list arguments (like the 'logits_to_keep' we added)
                     model_kwargs_batch[key] = value

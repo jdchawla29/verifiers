@@ -88,13 +88,21 @@ class Environment(ABC):
             self.eval_dataset = eval_dataset
 
         # Apply data collator if provided
-        if self.data_collator is not None and self.eval_dataset is not None:
-            self.eval_dataset = self.eval_dataset.map(
-                self.data_collator,
-                batched=True,
-                batch_size=len(self.eval_dataset),
-                remove_columns=[],
-            )
+        if self.data_collator is not None:
+            if self.dataset is not None:
+                self.dataset = self.dataset.map(
+                    self.data_collator,
+                    batched=True,
+                    batch_size=len(self.dataset),
+                    remove_columns=[],
+                )
+            if self.eval_dataset is not None:
+                self.eval_dataset = self.eval_dataset.map(
+                    self.data_collator,
+                    batched=True,
+                    batch_size=len(self.eval_dataset),
+                    remove_columns=[],
+                )
 
         self.parser = parser
         self.rubric = rubric

@@ -30,7 +30,7 @@ Respond in the following format:
     # Parser
     parser = vf.XMLParser(["think", "answer"], answer_field="answer")
 
-    # Data collator for multimodal inputs
+    # Data collator for multimodal inputs - example
     def data_collator(batch):
         """Format data for multimodal models - images are passed separately.
 
@@ -39,38 +39,41 @@ Respond in the following format:
         """
         prompts = []
         images = []
+
+        for i in range(len(batch["prompt"])):
+            existing_prompt = batch["prompt"][i]
+
+            new_messages = []
+            for msg in existing_prompt:
+                if msg["role"] == "user":
+                    new_msg = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": msg["content"]},
+                            {"type": "image"},  # Add image placeholder
+                        ],
+                    }
+                    new_messages.append(new_msg)
+                else:
+                    # Convert all other messages to list format too for consistency
+                    new_msg = {
+                        "role": msg["role"],
+                        "content": [{"type": "text", "text": msg["content"]}],
+                    }
+                    new_messages.append(new_msg)
+
+            prompts.append(new_messages)
+            images.append([batch["image"][i]])
+
+        # Process answers
         answers = []
-
-        for i in range(len(batch["question"])):
-            # Create multimodal prompt with image placeholder
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": batch["question"][i]},
-                        {
-                            "type": "image"
-                        },  # Placeholder - actual image handled by format_oai_chat_msg
-                    ],
-                },
-            ]
-
-            prompts.append(messages)
-            images.append([batch["image"][i]])  # Single image per question
-
-            # Convert list of answers to a single string for compatibility
+        for i in range(len(batch["prompt"])):
             answer = batch["answers"][i]
             if isinstance(answer, list):
                 answer = "|".join(answer)
             answers.append(answer)
 
-        # Return updated batch dict
-        result = dict(batch)  # Copy all existing columns
-        result["prompt"] = prompts
-        result["images"] = images
-        result["answer"] = answers
-        return result
+        return {"prompt": prompts, "images": images, "answer": answers}
 
     # Rubric with format checking and flexible answer matching
     def answer_match_reward(completion, answer, **kwargs):
@@ -101,7 +104,7 @@ Respond in the following format:
         parser=parser,
         rubric=rubric,
         data_collator=data_collator,
-        # Don't set system_prompt here since it's included in data_collator
+        system_prompt=system_prompt,
     )
 
     return vf_env

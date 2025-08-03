@@ -1,5 +1,5 @@
 import verifiers as vf
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 
 def load_environment(num_train_examples=-1, num_eval_examples=-1):
@@ -30,12 +30,11 @@ Respond in the following format:
     # Parser
     parser = vf.XMLParser(["think", "answer"], answer_field="answer")
 
-    # Data collator for multimodal inputs - example
+    # Data collator for multimodal inputs
     def data_collator(batch):
         """Format data for multimodal models - images are passed separately.
 
-        When used with dataset.map(batched=True), batch is a dict with lists of values.
-        Returns a dict with the same structure.
+        When used with set_transform, receives batched data.
         """
         prompts = []
         images = []
@@ -73,7 +72,12 @@ Respond in the following format:
                 answer = "|".join(answer)
             answers.append(answer)
 
-        return {"prompt": prompts, "images": images, "answer": answers}
+        # Return all columns including new ones
+        result = dict(batch)
+        result["prompt"] = prompts
+        result["images"] = images
+        result["answer"] = answers
+        return result
 
     # Rubric with format checking and flexible answer matching
     def answer_match_reward(completion, answer, **kwargs):

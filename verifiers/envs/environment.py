@@ -89,20 +89,11 @@ class Environment(ABC):
 
         # Apply data collator if provided
         if self.data_collator is not None:
+            # Use set_transform for on-the-fly transformation to avoid PIL serialization
             if self.dataset is not None:
-                self.dataset = self.dataset.map(
-                    self.data_collator,
-                    batched=True,
-                    batch_size=len(self.dataset),
-                    remove_columns=[],
-                )
+                self.dataset.set_transform(self.data_collator)
             if self.eval_dataset is not None:
-                self.eval_dataset = self.eval_dataset.map(
-                    self.data_collator,
-                    batched=True,
-                    batch_size=len(self.eval_dataset),
-                    remove_columns=[],
-                )
+                self.eval_dataset.set_transform(self.data_collator)
 
         self.parser = parser
         self.rubric = rubric
@@ -388,14 +379,12 @@ class Environment(ABC):
         # preprocess dataset or GenerateInputs to GenerateOutputs
         results_dict = {}
         if isinstance(inputs, Dataset):
-            # get prompt column
-            results_dict = {}
-            for col in inputs.column_names:
-                if col == "info":
-                    # handle info column to ensure mutable dicts
-                    results_dict[col] = [dict(item) for item in inputs[col]]
-                else:
-                    results_dict[col] = deepcopy(inputs[col])
+            # Get all data at once to include transformed columns
+            results_dict = deepcopy(inputs[:])
+            # Handle info column specially to ensure mutable dicts
+            if "info" in results_dict:
+                results_dict["info"] = [dict(item) if isinstance(item, dict) else item 
+                                       for item in results_dict["info"]]
         else:
             results_dict = {col: deepcopy(inputs[col]) for col in inputs}
         if "prompt" not in results_dict:

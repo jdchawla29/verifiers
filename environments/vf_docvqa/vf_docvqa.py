@@ -1,5 +1,5 @@
 import verifiers as vf
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 
 def load_environment(num_train_examples=-1, num_eval_examples=-1):
@@ -32,34 +32,52 @@ Respond in the following format:
 
     # Data collator for multimodal inputs
     def data_collator(batch):
-        """Format data for multimodal models - images are passed separately."""
-        processed_samples = []
-        for sample in batch:
-            # Create multimodal prompt with image placeholder
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": sample["question"]},
-                        {
-                            "type": "image"
-                        },  # Placeholder - actual image handled by format_oai_chat_msg
-                    ],
-                },
-            ]
+        """Format data for multimodal models - images are passed separately.
 
-            sample["prompt"] = messages
-            sample["images"] = [sample["image"]]  # Single image per question
-            # Convert list of answers to a single string for compatibility
-            # The rubric will still handle it as a list for matching
-            sample["answer"] = (
-                "|".join(sample["answers"])
-                if isinstance(sample["answers"], list)
-                else sample["answers"]
-            )
-            processed_samples.append(sample)
-        return processed_samples
+        When used with set_transform, receives batched data.
+        """
+        prompts = []
+        images = []
+
+        for i in range(len(batch["prompt"])):
+            existing_prompt = batch["prompt"][i]
+
+            new_messages = []
+            for msg in existing_prompt:
+                if msg["role"] == "user":
+                    new_msg = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": msg["content"]},
+                            {"type": "image"},  # Add image placeholder
+                        ],
+                    }
+                    new_messages.append(new_msg)
+                else:
+                    # Convert all other messages to list format too for consistency
+                    new_msg = {
+                        "role": msg["role"],
+                        "content": [{"type": "text", "text": msg["content"]}],
+                    }
+                    new_messages.append(new_msg)
+
+            prompts.append(new_messages)
+            images.append([batch["image"][i]])
+
+        # Process answers
+        answers = []
+        for i in range(len(batch["prompt"])):
+            answer = batch["answers"][i]
+            if isinstance(answer, list):
+                answer = "|".join(answer)
+            answers.append(answer)
+
+        # Return all columns including new ones
+        result = dict(batch)
+        result["prompt"] = prompts
+        result["images"] = images
+        result["answer"] = answers
+        return result
 
     # Rubric with format checking and flexible answer matching
     def answer_match_reward(completion, answer, **kwargs):
@@ -90,7 +108,7 @@ Respond in the following format:
         parser=parser,
         rubric=rubric,
         data_collator=data_collator,
-        # Don't set system_prompt here since it's included in data_collator
+        system_prompt=system_prompt,
     )
 
     return vf_env

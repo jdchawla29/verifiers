@@ -2,17 +2,15 @@
 GRPO training script for DocVQA environment.
 
 For local multimodal model training:
-    # Install model requirements
-    uv pip install qwen-vl-utils
-
     # Run training (requires 2 GPUs)
     # GPU 0: Inference server
-    CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model 'Qwen/Qwen2-VL-2B-Instruct' --max-model-len 16384
+    CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model 'Qwen/Qwen2.5-VL-3B-Instruct' --max-model-len 16384
 
     # GPU 1: Training
     CUDA_VISIBLE_DEVICES=1 uv run accelerate launch --config_file configs/single_gpu.yaml examples/grpo/train_docvqa.py
 """
 
+import argparse
 import logging
 import sys
 import verifiers as vf
@@ -28,72 +26,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def qwen_data_collator(batch):
-    """Format data for Qwen VLM models."""
-    from qwen_vl_utils import process_vision_info
-
-    processed_samples = []
-    for sample in batch:
-        messages = []
-        # System prompt
-        messages.append(
-            {
-                "role": "system",
-                "content": """Answer the questions about the document image.
-
-Respond in the following format:
-<think>
-[Your reasoning here]
-</think>
-<answer>
-[Your concise answer here]
-</answer>""",
-            }
-        )
-
-        # User message with image
-        content_block = []
-        content_block.append({"type": "text", "text": sample["question"]})
-        content_block.append(
-            {
-                "type": "image",
-                "image": sample["image"],
-                "resized_height": 768,  # Higher resolution for document images
-                "resized_width": 768,
-            }
-        )
-        messages.append({"role": "user", "content": content_block})
-
-        # Process images for Qwen
-        processed_images, *_ = process_vision_info(messages.copy())
-
-        sample["prompt"] = messages
-        sample["images"] = processed_images
-        sample["answer"] = sample["answers"]
-        processed_samples.append(sample)
-    return processed_samples
-
-
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Train multimodal models on DocVQA")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen2.5-VL-3B-Instruct",
+        help="Model to train (must match the vLLM server model)",
+    )
+    parser.add_argument(
+        "--train-samples", type=int, default=1000, help="Number of training samples"
+    )
+    parser.add_argument(
+        "--eval-samples", type=int, default=100, help="Number of evaluation samples"
+    )
+    args = parser.parse_args()
+
     # Model configuration
-    MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"
+    MODEL_NAME = args.model
 
     # Training configuration
-    TRAIN_SAMPLES = 1000  # Number of training samples
-    EVAL_SAMPLES = 100  # Number of eval samples
+    TRAIN_SAMPLES = args.train_samples
+    EVAL_SAMPLES = args.eval_samples
     MAX_STEPS = 200
     EVAL_STEPS = 20
-    BATCH_SIZE = 2
+    BATCH_SIZE = 4
     GRADIENT_ACCUMULATION_STEPS = 4
-    NUM_GENERATIONS = 4
+    NUM_GENERATIONS = 8
 
-    # Load environment with custom data collator for training
     vf_env = load_environment(
         num_train_examples=TRAIN_SAMPLES, num_eval_examples=EVAL_SAMPLES
     )
-
-    # Override data collator for Qwen model
-    vf_env.data_collator = qwen_data_collator
+    
+    # Since we're using set_transform, we don't need the data_collator in trainer
+    vf_env.data_collator = None
 
     # Load model and processor
     model, processor = vf.get_model_and_tokenizer(MODEL_NAME)
@@ -103,11 +70,12 @@ def main():
     training_args = vf.grpo_defaults(run_name=run_name)
 
     # Customize training arguments
-    training_args.learning_rate = 1e-6  # Lower LR for vision models
+    training_args.learning_rate = 1e-6
     training_args.max_steps = MAX_STEPS
     training_args.eval_strategy = "steps"
     training_args.eval_steps = EVAL_STEPS
     training_args.save_steps = EVAL_STEPS
+    training_args.eval_on_start = True  # Run evaluation at step 0
     training_args.gradient_checkpointing_kwargs = {
         "use_reentrant": False,
     }
@@ -116,15 +84,18 @@ def main():
     training_args.num_generations = NUM_GENERATIONS
     training_args.per_device_train_batch_size = BATCH_SIZE
     training_args.gradient_accumulation_steps = GRADIENT_ACCUMULATION_STEPS
+    # Don't set generation_batch_size explicitly - let it be calculated automatically
+    # It will be: per_device_train_batch_size * num_processes * gradient_accumulation_steps
+    # = 4 * 4 * 4 = 64 unique prompts
+    # Total rollouts = 64 * 8 = 512
 
-    # Memory optimization for multimodal training
-    training_args.fp16 = True
-    training_args.optim = "adamw_8bit"
     training_args.gradient_checkpointing = True
 
     # Generation settings
     training_args.temperature = 0.7
-    training_args.max_new_tokens = 200
+    training_args.max_tokens = 200
+    # Increase max_seq_len to accommodate multimodal inputs
+    training_args.max_seq_len = 6144  # Balance between context and memory usage
 
     # Create trainer
     trainer = vf.GRPOTrainer(

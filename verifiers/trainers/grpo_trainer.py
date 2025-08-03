@@ -31,6 +31,8 @@ from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
 from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.utils.model_utils import generic_model_loader
+from verifiers.utils.processor_utils import ProcessorWrapper
+from verifiers.utils.multimodal_utils import MultimodalHandler
 
 
 class RepeatSampler(Sampler):
@@ -280,18 +282,9 @@ class GRPOTrainer(Trainer):
         # Suppress irrelevant warning
         model.warnings_issued["estimate_tokens"] = True
 
-        self.tokenizer_base = getattr(
-            processing_class, "tokenizer", None
-        )  # extract tokenizer in multimodal case
-        # Tokenizer pad token
-        if self.tokenizer_base is not None:
-            if processing_class.tokenizer.pad_token is None:  # type: ignore
-                processing_class.tokenizer.pad_token = (
-                    processing_class.tokenizer.eos_token
-                )  # type: ignore
-        else:
-            if processing_class.pad_token is None:  # type: ignore
-                processing_class.pad_token = processing_class.eos_token  # type: ignore
+        # Wrap processing class for unified interface
+        self.processor_wrapper = ProcessorWrapper(processing_class)
+        self.processor_wrapper.ensure_pad_token()
 
         # Training arguments
         self.per_device_train_batch_size = args.per_device_train_batch_size
@@ -413,18 +406,13 @@ class GRPOTrainer(Trainer):
                 # Tokenize prompt to check length
                 if isinstance(prompt, list):
                     # Chat format
-                    prompt_text = processing_class.apply_chat_template(
+                    prompt_text = self.processor_wrapper.apply_chat_template(
                         prompt, tokenize=False, add_generation_prompt=True
                     )
                 else:
                     # Completion format
                     prompt_text = prompt
-                if self.tokenizer_base is not None:
-                    encode = self.tokenizer_base.encode
-                else:
-                    assert isinstance(processing_class, PreTrainedTokenizerBase)
-                    encode = processing_class.encode
-                prompt_ids = encode(prompt_text)  # type: ignore
+                prompt_ids = self.processor_wrapper.encode(prompt_text)  # type: ignore
                 return len(prompt_ids) <= max_length
 
             original_size = len(train_dataset)
@@ -758,9 +746,28 @@ class GRPOTrainer(Trainer):
                     # 1. Slice the list to get the tensors for this micro-batch
                     sub_list = value[i : i + batch_size]
                     # 2. Batch the tensors in the sub-list together
-                    model_kwargs_batch[key] = torch.cat(sub_list, dim=0).to(
-                        self.accelerator.device
-                    )
+                    # Handle different tensor types appropriately
+                    if key == "pixel_values" and len(sub_list) > 0:
+                        # For pixel_values, each item might have different shapes
+                        # Just pass them as a list if they can't be concatenated
+                        if all(
+                            isinstance(item, torch.Tensor)
+                            and item.shape == sub_list[0].shape
+                            for item in sub_list
+                        ):
+                            model_kwargs_batch[key] = torch.stack(sub_list, dim=0).to(
+                                self.accelerator.device
+                            )
+                        else:
+                            # Different shapes, pass as list
+                            model_kwargs_batch[key] = [
+                                item.to(self.accelerator.device) for item in sub_list
+                            ]
+                    else:
+                        # For other tensors, use standard concatenation
+                        model_kwargs_batch[key] = torch.cat(sub_list, dim=0).to(
+                            self.accelerator.device
+                        )
                 else:
                     # Handle non-list arguments (like the 'logits_to_keep' we added)
                     model_kwargs_batch[key] = value
@@ -965,13 +972,12 @@ class GRPOTrainer(Trainer):
 
         # Gather batch data from all processes
         prompts = [x["prompt"] for x in batch]
-        images = [x["images"] for x in batch if "images" in x]
+        images = MultimodalHandler.extract_images_from_batch(batch)
         answers = [x["answer"] for x in batch]
         tasks = [x.get("task", "default") for x in batch]
         infos = [x.get("info", {}) for x in batch]
         all_prompts = gather_object(prompts)
-        all_images = gather_object(images)
-        all_images = all_images if all_images != [] else None
+        all_images = gather_object(images) if images else None
         all_answers = gather_object(answers)
         all_tasks = gather_object(tasks)
         all_infos = gather_object(infos)
@@ -1092,15 +1098,15 @@ class GRPOTrainer(Trainer):
 
                 # Package raw data for broadcast (not tensors yet)
                 broadcast_data = {
-                    "prompt_ids": processed_results["prompt_ids"],
-                    "prompt_mask": processed_results["prompt_mask"],
-                    "completion_ids": processed_results["completion_ids"],
-                    "completion_mask": processed_results["completion_mask"],
-                    "rewards": processed_results["rewards"],
-                    "remaining_inputs": processed_results["remaining_inputs"],
+                    "prompt_ids": processed_results.prompt_ids,
+                    "prompt_mask": processed_results.prompt_mask,
+                    "completion_ids": processed_results.completion_ids,
+                    "completion_mask": processed_results.completion_mask,
+                    "rewards": processed_results.rewards,
+                    "remaining_inputs": processed_results.remaining_inputs,
                     "all_reward_dict": batch_result.all_reward_dict
                     if hasattr(batch_result, "all_reward_dict")
-                    else {"reward": processed_results["rewards"]},
+                    else {"reward": processed_results.rewards},
                     "completions": batch_result.completions
                     if hasattr(batch_result, "completions")
                     else [],
@@ -1154,17 +1160,13 @@ class GRPOTrainer(Trainer):
                 )
 
             # Pad sequences
-            if self.tokenizer_base is not None:
-                pad_token_id = self.tokenizer_base.pad_token_id
-            else:
-                assert isinstance(self.processing_class, PreTrainedTokenizerBase)
-                pad_token_id = self.processing_class.pad_token_id
+            pad_token_id = self.processor_wrapper.pad_token_id
 
             input_ids = pad(
                 input_ids_list,
-                padding_value=pad_token_id,
+                padding_value=pad_token_id,  # type: ignore
                 padding_side="right",
-            )  # type: ignore
+            )
             attention_mask = pad(attention_mask_list, padding_side="right")  # type: ignore
             # Truncate if needed
             if self.max_seq_len is not None and input_ids.size(1) > self.max_seq_len:
@@ -1175,7 +1177,11 @@ class GRPOTrainer(Trainer):
             advantages = all_advantages[process_slice]
 
             # slice remaining inputs
-            remaining_inputs = broadcast_data["remaining_inputs"][process_slice]
+            if broadcast_data["remaining_inputs"]:
+                remaining_inputs = broadcast_data["remaining_inputs"][process_slice]
+            else:
+                # If remaining_inputs is empty, create a list of None with correct length
+                remaining_inputs = [None] * (process_slice.stop - process_slice.start)
             # Log metrics on main process only
             if self.accelerator.is_main_process:
                 self._log_reward_metrics_primary(
@@ -1397,6 +1403,29 @@ class GRPOTrainer(Trainer):
                 msg.pop("tool_call_id")
         return completion
 
+    def _sanitize_multimodal_prompt(self, prompt: Any) -> str:
+        """Convert multimodal prompt to text representation for wandb logging."""
+        if isinstance(prompt, list) and len(prompt) > 0:
+            text_parts = []
+            for msg in prompt:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Extract text from multimodal content
+                        text_content = ""
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_content += item.get("text", "")
+                            elif isinstance(item, dict) and item.get("type") == "image":
+                                text_content += " [IMAGE]"
+                        text_parts.append(f"{role}: {text_content}")
+                    elif isinstance(content, str):
+                        text_parts.append(f"{role}: {content}")
+            return "\n".join(text_parts)
+        else:
+            return str(prompt)
+
     def evaluate(
         self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", **kwargs
     ):
@@ -1411,6 +1440,12 @@ class GRPOTrainer(Trainer):
             return {}
 
         self.logger.info("Running evaluation using environment's evaluate method")
+
+        # Start async generator if not started (needed for eval at step 0)
+        if not self._async_started and self.accelerator.is_main_process:
+            self.async_generator.start()
+            self._async_started = True
+        self.accelerator.wait_for_everyone()
 
         # Only the main process computes evaluation to avoid duplicate work
         if self.accelerator.is_main_process:
@@ -1456,27 +1491,17 @@ class GRPOTrainer(Trainer):
         completions = eval_results.completion
         if isinstance(completions[0], str):
             # Completion format - directly tokenize strings
-            if self.tokenizer_base is not None:
-                encode = self.tokenizer_base.encode
-            else:
-                assert isinstance(self.processing_class, PreTrainedTokenizerBase)
-                encode = self.processing_class.encode
-            completion_lengths = [len(encode(c)) for c in completions]  # type: ignore
+            completion_lengths = [
+                len(self.processor_wrapper.encode(c)) for c in completions
+            ]
         else:
             # Chat format - use apply_chat_template
             completion_lengths = []
             for comp in completions:
                 # Apply chat template to get the full text
-                if hasattr(
-                    self.processing_class, "tokenizer"
-                ):  # if multimodal processor, use tokenizer; ow, it expects mm inputs
-                    tokens = self.processing_class.tokenizer.apply_chat_template(
-                        comp, tokenize=True, add_generation_prompt=False
-                    )  # type: ignore
-                else:
-                    tokens = self.processing_class.apply_chat_template(
-                        comp, tokenize=True, add_generation_prompt=False
-                    )  # type: ignore
+                tokens = self.processor_wrapper.apply_chat_template(
+                    comp, tokenize=True, add_generation_prompt=False
+                )
                 # Tokenize and count
                 completion_lengths.append(len(tokens))
 
@@ -1518,23 +1543,22 @@ class GRPOTrainer(Trainer):
                 prompt = []
                 if prompts:
                     for messages in prompts:
-                        last_message = messages[-1]
-                        content = last_message.get("content", "")
-                        if isinstance(content, list):
-                            # Extract text from multimodal content
-                            text_content = ""
-                            for item in content:
-                                if (
-                                    isinstance(item, dict)
-                                    and item.get("type") == "text"
-                                ):
-                                    text_content = item.get("text", "")
-                                    break
-                            content = text_content
-                        prompt.append([{"role": "user", "content": content}])
+                        if isinstance(messages, str):
+                            # Completion format
+                            prompt.append([{"role": "user", "content": messages}])
+                        else:
+                            # Chat format
+                            last_message = messages[-1]
+                            content = last_message.get("content", "")
+                            content = (
+                                MultimodalHandler.extract_text_from_multimodal_content(
+                                    content
+                                )
+                            )
+                            prompt.append([{"role": "user", "content": content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
-                    "prompt": prompts,
+                    "prompt": [self._sanitize_multimodal_prompt(p) for p in prompts],
                     "completion": [
                         self._sanitize_tool_calls(c)  # type: ignore
                         for c in completions
@@ -1590,20 +1614,19 @@ class GRPOTrainer(Trainer):
                 prompt = []
                 if list(self._textual_logs["prompt"]):
                     for messages in list(self._textual_logs["prompt"]):
-                        last_message = messages[-1]
-                        content = last_message.get("content", "")
-                        if isinstance(content, list):
-                            # Extract text from multimodal content
-                            text_content = ""
-                            for item in content:
-                                if (
-                                    isinstance(item, dict)
-                                    and item.get("type") == "text"
-                                ):
-                                    text_content = item.get("text", "")
-                                    break
-                            content = text_content
-                        prompt.append([{"role": "user", "content": content}])
+                        if isinstance(messages, str):
+                            # Completion format
+                            prompt.append([{"role": "user", "content": messages}])
+                        else:
+                            # Chat format
+                            last_message = messages[-1]
+                            content = last_message.get("content", "")
+                            content = (
+                                MultimodalHandler.extract_text_from_multimodal_content(
+                                    content
+                                )
+                            )
+                            prompt.append([{"role": "user", "content": content}])
                 table = {
                     "step": [str(self.state.global_step)]
                     * len(self._textual_logs["prompt"]),
@@ -1712,11 +1735,7 @@ class GRPOTrainer(Trainer):
 
         # Check for EOS tokens
         term_lengths = []
-        if self.tokenizer_base is not None:
-            eos_token_id = self.tokenizer_base.eos_token_id
-        else:
-            assert isinstance(self.processing_class, PreTrainedTokenizerBase)
-            eos_token_id = self.processing_class.eos_token_id
+        eos_token_id = self.processor_wrapper.eos_token_id
         for comp_ids, comp_mask in zip(all_completion_ids, all_completion_mask):
             has_eos = any(
                 token == eos_token_id  # type: ignore

@@ -1,16 +1,15 @@
 import asyncio
 import json
-import base64
-import io
 import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
 from PIL import Image
+from transformers import PreTrainedTokenizerBase
 
 from verifiers.parsers.parser import Parser
 from verifiers.rubrics.rubric import Rubric
@@ -29,52 +28,10 @@ from verifiers.types import (
     SamplingArgs,
     State,
 )
+from verifiers.utils.multimodal_utils import MultimodalHandler
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-
-def _pil_to_data_url(img: Image.Image, fmt: str | None = None) -> str:
-    """Convert PIL Image to data URL for multimodal inputs."""
-    buf = io.BytesIO()
-    fmt = (fmt or img.format or "PNG").upper()
-    img.save(buf, format=fmt)
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/{fmt.lower()};base64,{b64}"
-
-
-def format_oai_chat_msg(
-    prompts: List[List[Dict[str, Any]]], images: List[List[Image.Image]]
-) -> List[Any]:
-    """Format multimodal chat messages for OpenAI API."""
-    formatted_conversations = []
-
-    for conv_prompts, conv_images in zip(prompts, images):
-        img_iter = iter(conv_images)
-        new_conv = []
-
-        for msg in conv_prompts:
-            role = msg["role"]
-            content = msg["content"]
-
-            if isinstance(content, list):
-                new_parts = []
-                for part in content:
-                    if part.get("type") == "image":
-                        img = next(img_iter)
-                        data_url = _pil_to_data_url(img)
-                        new_parts.append(
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        )
-                    else:
-                        new_parts.append(part.copy())
-                new_conv.append({"role": role, "content": new_parts})
-            else:
-                new_conv.append({"role": role, "content": content})
-
-        formatted_conversations.append(new_conv)
-
-    return formatted_conversations
 
 
 class Environment(ABC):
@@ -131,18 +88,12 @@ class Environment(ABC):
             self.eval_dataset = eval_dataset
 
         # Apply data collator if provided
-        if self.data_collator is not None and self.eval_dataset is not None:
-            # Convert dataset samples to plain dicts to avoid pickling issues
-            dataset_as_dicts = [dict(sample) for sample in self.eval_dataset]
-            processed_dataset = self.data_collator(dataset_as_dicts)
-            if not processed_dataset:
-                self.eval_dataset = {}
-            else:
-                keys = list(processed_dataset[0].keys())
-                self.eval_dataset = {
-                    key: [sample.get(key) for sample in processed_dataset]
-                    for key in keys
-                }
+        if self.data_collator is not None:
+            # Use set_transform for on-the-fly transformation to avoid PIL serialization
+            if self.dataset is not None:
+                self.dataset.set_transform(self.data_collator)
+            if self.eval_dataset is not None:
+                self.eval_dataset.set_transform(self.data_collator)
 
         self.parser = parser
         self.rubric = rubric
@@ -221,22 +172,16 @@ class Environment(ABC):
 
     def get_eval_dataset(
         self, n: int = -1, seed: int | None = None, **kwargs
-    ) -> Dataset | dict[Any, list[Any]] | None:
+    ) -> Dataset | None:
         if self.eval_dataset is None:
             self.logger.warning(
                 "eval_dataset is not set, falling back to train dataset"
             )
             return self.get_dataset(n, seed, **kwargs)
-        if isinstance(self.eval_dataset, Dataset):
-            if seed is not None:
-                self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
-            if n > 0:
-                return self.eval_dataset.select(range(n))
-        elif isinstance(self.eval_dataset, dict) and n > 0:
-            # Handle dict format for data collator output
-            return {
-                key: value_list[:n] for key, value_list in self.eval_dataset.items()
-            }
+        if seed is not None:
+            self.eval_dataset = self.eval_dataset.shuffle(seed=seed)
+        if n > 0:
+            return self.eval_dataset.select(range(n))
         return self.eval_dataset
 
     def get_reward_funcs(self) -> List[RewardFunc]:
@@ -271,7 +216,9 @@ class Environment(ABC):
                 images = kwargs.get("images")
                 if images:
                     # Format multimodal messages
-                    formatted_prompts = format_oai_chat_msg([prompt], [images])
+                    formatted_prompts = MultimodalHandler.format_openai_messages(
+                        [prompt], [images]
+                    )
                     prompt = formatted_prompts[0]
 
                 if oai_tools:
@@ -350,7 +297,7 @@ class Environment(ABC):
         infos: List[Info] = [],
         sampling_args: SamplingArgs = {},
         max_concurrent: int = -1,
-        images: Optional[List[List[Any]]] = None,
+        images: Optional[List[List[Image.Image]]] = None,
         **kwargs,
     ) -> List[Tuple[Messages, State]]:
         """
@@ -360,7 +307,9 @@ class Environment(ABC):
 
         # Handle images
         if images is None:
-            images = [None] * len(prompts)
+            images_list = [[] for _ in range(len(prompts))]
+        else:
+            images_list = images
 
         if max_concurrent > 0:
             semaphore = asyncio.Semaphore(max_concurrent)
@@ -378,7 +327,7 @@ class Environment(ABC):
                     **kwargs,
                 )
                 for prompt, answer, task, info, img in zip(
-                    prompts, answers, tasks, infos, images
+                    prompts, answers, tasks, infos, images_list
                 )
             ]
         else:
@@ -395,7 +344,7 @@ class Environment(ABC):
                     **kwargs,
                 )
                 for prompt, answer, task, info, img in zip(
-                    prompts, answers, tasks, infos, images
+                    prompts, answers, tasks, infos, images_list
                 )
             ]
         return await tqdm_asyncio.gather(
@@ -430,14 +379,12 @@ class Environment(ABC):
         # preprocess dataset or GenerateInputs to GenerateOutputs
         results_dict = {}
         if isinstance(inputs, Dataset):
-            # get prompt column
-            results_dict = {}
-            for col in inputs.column_names:
-                if col == "info":
-                    # handle info column to ensure mutable dicts
-                    results_dict[col] = [dict(item) for item in inputs[col]]
-                else:
-                    results_dict[col] = deepcopy(inputs[col])
+            # Get all data at once to include transformed columns
+            results_dict = deepcopy(inputs[:])
+            # Handle info column specially to ensure mutable dicts
+            if "info" in results_dict:
+                results_dict["info"] = [dict(item) if isinstance(item, dict) else item 
+                                       for item in results_dict["info"]]
         else:
             results_dict = {col: deepcopy(inputs[col]) for col in inputs}
         if "prompt" not in results_dict:
@@ -544,7 +491,7 @@ class Environment(ABC):
     def process_chat_format(
         self,
         prompt: List[ChatMessage],
-        images: Optional[List[List[Any]]],
+        images: Optional[List[Image.Image]],
         completion: List[ChatMessage],
         processing_class: Any,
         mask_env_responses: bool = False,
@@ -560,8 +507,6 @@ class Environment(ABC):
         Returns:
             prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs
         """
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
         completion_ids = []
         completion_mask = []
         remaining_inputs = {}
@@ -723,7 +668,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
     def process_env_results(
         self,
         prompts: List[Messages],
-        images: Optional[List[List[Any]]],
+        images: Optional[List[List[Image.Image]]],
         completions: List[Messages],
         states: List[State],
         rewards: List[float],
@@ -862,6 +807,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         state: State,
         processing_class: "PreTrainedTokenizerBase",
         mask_env_responses: bool = False,
+        images: Optional[List[Image.Image]] = None,
     ) -> Tuple[List[int], List[int], List[int], List[int], List[float]]:
         """
         Process chat format conversations using incremental prefixes.
@@ -877,10 +823,23 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                 zipped.append((turn, None))
         assert len(responses) == responses_idx, "Responses not fully consumed"
         assert len(zipped) == len(completion), "Length mismatch"
-        prompt_ids: list[int] = processing_class.apply_chat_template(
-            conversation=prompt,  # type: ignore
-            add_generation_prompt=True,
-        )
+        if images:
+            # Handle multimodal case with processor
+            assert not isinstance(processing_class, PreTrainedTokenizerBase)
+            prompt_text = processing_class.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
+            assert isinstance(prompt_text, str)
+            inputs = processing_class(
+                text=prompt_text, images=images, return_tensors="pt"
+            )
+            prompt_ids = inputs.input_ids[0].tolist()
+        else:
+            # Regular tokenizer case
+            prompt_ids: list[int] = processing_class.apply_chat_template(
+                conversation=prompt,  # type: ignore
+                add_generation_prompt=True,
+            )
         messages_consumed = deepcopy(prompt)
         prompt_mask: list[int] = [0] * len(prompt_ids)
         completion_ids: list[int] = []
@@ -950,6 +909,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         mask_env_responses: bool = False,
         mask_truncated_completions: bool = False,
         zero_truncated_completions: bool = False,
+        images: Optional[List[List[Image.Image]]] = None,
     ) -> ProcessedOutputs:
         """
         Process results with vLLM tokens/logprobs.
@@ -966,8 +926,11 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         all_completion_masks = []
         all_completion_logprobs = []
         all_rewards = []
-        for i, (prompt, completion, state, reward) in enumerate(
-            zip(prompts, completions, states, rewards)
+        # Handle images list
+        input_images = images if images is not None else [[] for _ in prompts]
+        
+        for i, (prompt, completion, state, reward, img) in enumerate(
+            zip(prompts, completions, states, rewards, input_images)
         ):
             # Format-specific processing
             if is_chat_format:
@@ -979,7 +942,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                     completion_mask,
                     completion_logprobs,
                 ) = self.process_chat_format_vllm(
-                    prompt, completion, state, processing_class, mask_env_responses
+                    prompt, completion, state, processing_class, mask_env_responses, img
                 )
             else:
                 assert isinstance(prompt, str) and isinstance(completion, str)
@@ -1022,6 +985,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             completion_mask=all_completion_masks,
             completion_logprobs=all_completion_logprobs,
             rewards=all_rewards,
+            remaining_inputs=[],
         )
 
     # Evaluation and dataset generation
@@ -1047,14 +1011,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             inputs = self.get_eval_dataset(n=num_examples)
         assert inputs is not None, "No dataset found"
         if rollouts_per_example > 1:
-            if isinstance(inputs, Dataset):
-                inputs = inputs.repeat(rollouts_per_example)
-            elif isinstance(inputs, dict):
-                # Handle dict format
-                inputs = {
-                    key: value_list * rollouts_per_example
-                    for key, value_list in inputs.items()
-                }
+            inputs = inputs.repeat(rollouts_per_example)
 
         results = self.generate(
             inputs,

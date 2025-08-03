@@ -296,6 +296,7 @@ class AsyncBatchGenerator:
                 mask_env_responses=request.mask_env_responses,
                 mask_truncated_completions=request.mask_truncated_completions,
                 zero_truncated_completions=request.zero_truncated_completions,
+                images=env_results.images,
             )
         else:
             processed_results = self.env.process_env_results(

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # Configuration
-    API_TYPE = "vllm"  # "openai" or "vllm"
+    API_TYPE = "openai"  # "openai" or "vllm"
     EVAL_NUM_EXAMPLES = 5  # Number of examples to evaluate
 
     # Load environment

@@ -7,7 +7,7 @@ import base64
 from datasets import Dataset
 
 from verifiers import SingleTurnEnv, Parser, Rubric
-from verifiers.envs.environment import _pil_to_data_url, format_oai_chat_msg
+from verifiers.utils.multimodal_utils import MultimodalHandler
 from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchRequest
 
 
@@ -78,7 +78,7 @@ class TestMultimodalUtils:
         img = Image.new("RGB", (10, 10), color="red")
 
         # Convert to data URL
-        data_url = _pil_to_data_url(img)
+        data_url = MultimodalHandler.pil_to_data_url(img)
 
         # Check format
         assert data_url.startswith("data:image/png;base64,")
@@ -89,10 +89,10 @@ class TestMultimodalUtils:
         assert len(decoded) > 0
 
         # Test with specific format
-        data_url_jpeg = _pil_to_data_url(img, fmt="JPEG")
+        data_url_jpeg = MultimodalHandler.pil_to_data_url(img, fmt="JPEG")
         assert data_url_jpeg.startswith("data:image/jpeg;base64,")
 
-    def test_format_oai_chat_msg(self):
+    def test_format_openai_messages(self):
         """Test formatting OpenAI-style chat messages with images."""
         # Create test data with multimodal content
         prompts = [
@@ -122,7 +122,7 @@ class TestMultimodalUtils:
         images = [[img1], [img2]]
 
         # Format messages
-        formatted = format_oai_chat_msg(prompts, images)
+        formatted = MultimodalHandler.format_openai_messages(prompts, images)
 
         # Check structure
         assert len(formatted) == 2
@@ -138,7 +138,7 @@ class TestMultimodalUtils:
             "data:image/png;base64,"
         )
 
-    def test_format_oai_chat_msg_text_only(self):
+    def test_format_openai_messages_text_only(self):
         """Test formatting text-only messages (no image placeholders)."""
         prompts = [
             [{"role": "user", "content": "Hello"}],
@@ -149,7 +149,7 @@ class TestMultimodalUtils:
         images = [[], []]
 
         # Should return prompts unchanged since no images to format
-        formatted = format_oai_chat_msg(prompts, images)
+        formatted = MultimodalHandler.format_openai_messages(prompts, images)
         assert formatted == prompts
 
 
@@ -311,8 +311,8 @@ class TestMultimodalIntegration:
     The multimodal flow in verifiers works as follows:
     1. Data collator transforms prompts to have content as a list with text and image placeholders
     2. Images are stored separately in the "images" column
-    3. When a_generate is called with a dataset containing images, format_oai_chat_msg is invoked
-    4. format_oai_chat_msg replaces image placeholders with base64-encoded data URLs
+    3. When a_generate is called with a dataset containing images, format_openai_messages is invoked
+    4. format_openai_messages replaces image placeholders with base64-encoded data URLs
     5. The formatted messages are sent to the API with proper multimodal structure
     """
 
@@ -320,21 +320,27 @@ class TestMultimodalIntegration:
         """Test a data collator workflow similar to docvqa example."""
 
         def data_collator(batch):
-            processed = []
-            for sample in batch:
+            # Handle batched format from dataset.map()
+            prompts = []
+            images = []
+
+            for i in range(len(batch["question"])):
                 # Create multimodal prompt format with image placeholders
                 content_block = []
-                content_block.append({"type": "text", "text": sample["question"]})
+                content_block.append({"type": "text", "text": batch["question"][i]})
                 content_block.append({"type": "image"})  # Image placeholder
 
                 # Format the prompt with multimodal content
-                sample["prompt"] = [{"role": "user", "content": content_block}]
+                prompts.append([{"role": "user", "content": content_block}])
 
                 # Add the actual images
-                sample["images"] = [Image.new("RGB", (10, 10), color="red")]
+                images.append([Image.new("RGB", (10, 10), color="red")])
 
-                processed.append(sample)
-            return processed
+            # Return updated batch dict
+            result = dict(batch)
+            result["prompt"] = prompts
+            result["images"] = images
+            return result
 
         # Create datasets
         train_dataset = Dataset.from_dict(
@@ -361,9 +367,9 @@ class TestMultimodalIntegration:
         )
 
         # Check that data collator was applied to the eval_dataset
-        # The eval_dataset should now have images
-        assert "images" in env.eval_dataset
-        assert len(env.eval_dataset["images"]) == 2
+        # The eval_dataset should now have images column
+        assert "images" in env.eval_dataset.column_names
+        assert len(env.eval_dataset) == 2
 
         # Verify the images were added correctly
         assert len(env.eval_dataset["images"][0]) == 1
@@ -377,19 +383,26 @@ class TestMultimodalIntegration:
 
         # Create a data collator that formats prompts for multimodal
         def multimodal_collator(batch):
-            processed = []
-            for sample in batch:
+            # Handle batched format from dataset.map()
+            prompts = []
+            images = []
+
+            for i in range(len(batch["question"])):
                 # Create multimodal content structure
                 content = [
-                    {"type": "text", "text": sample["question"]},
+                    {"type": "text", "text": batch["question"][i]},
                     {"type": "image"},  # Placeholder for image
                 ]
-                sample["prompt"] = [{"role": "user", "content": content}]
+                prompts.append([{"role": "user", "content": content}])
                 # Create a simple PIL image
                 img = Image.new("RGB", (10, 10), color="red")
-                sample["images"] = [img]
-                processed.append(sample)
-            return processed
+                images.append([img])
+
+            # Return updated batch dict
+            result = dict(batch)
+            result["prompt"] = prompts
+            result["images"] = images
+            return result
 
         # Create dataset
         base_dataset = Dataset.from_dict(
@@ -407,22 +420,6 @@ class TestMultimodalIntegration:
 
         # Run generation on eval dataset (which has data_collator applied)
         test_input = env.get_eval_dataset(n=1)
-
-        # Debug: Check what test_input looks like
-        print(f"test_input type: {type(test_input)}")
-        if isinstance(test_input, dict):
-            print(f"test_input keys: {test_input.keys()}")
-            for key, value in test_input.items():
-                print(
-                    f"  {key}: type={type(value)}, len={len(value) if hasattr(value, '__len__') else 'N/A'}"
-                )
-                if key == "prompt" and value:
-                    print(f"    First prompt: {value[0]}")
-                if key == "images" and value:
-                    print(f"    First images: {value[0]}")
-                    print(
-                        f"    Image type: {type(value[0][0]) if value[0] else 'None'}"
-                    )
 
         results = await env.a_generate(
             test_input, client=mock_openai_client, model="test-model"
@@ -449,7 +446,7 @@ class TestMultimodalIntegration:
         last_user_msg = user_messages[-1]
 
         # With the data collator, prompts should have multimodal format
-        # and when images are present, format_oai_chat_msg should be called
+        # and when images are present, format_openai_messages should be called
         if "images" in test_input and test_input["images"]:
             # Check if the content is properly formatted as multimodal
             assert isinstance(last_user_msg["content"], list), (

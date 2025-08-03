@@ -11,64 +11,6 @@ from verifiers.utils.multimodal_utils import MultimodalHandler
 from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchRequest
 
 
-class MockProcessor:
-    """Mock processor for multimodal tests that mimics AutoProcessor behavior."""
-
-    def __init__(self):
-        # Use MagicMock for tokenizer so it auto-creates attributes like pad_token
-        self.tokenizer = MagicMock()
-        self.tokenizer.encode.side_effect = lambda text: list(range(len(text.split())))
-        self.tokenizer.apply_chat_template.side_effect = (
-            lambda messages, **kwargs: " ".join(
-                [f"{msg['role']}: {msg['content']}" for msg in messages]
-            )
-        )
-        # Set pad_token to None to match expected behavior
-        self.tokenizer.pad_token = None
-
-        # Processor should have chat_template
-        self.chat_template = "test_template"
-
-    def apply_chat_template(self, messages, **kwargs):
-        """Apply chat template - processors have this method directly."""
-        return self.tokenizer.apply_chat_template(messages, **kwargs)
-
-    def __call__(self, text=None, images=None, return_tensors=None, **kwargs):
-        """Process text and images like a real processor."""
-
-        # Mock tensor class
-        class MockTensor:
-            def __init__(self, data):
-                self._data = data
-
-            def tolist(self):
-                return self._data
-
-            def __getitem__(self, idx):
-                return self
-
-        # Create a dict-like object that also supports attribute access
-        class ProcessorOutput(dict):
-            def __getattr__(self, key):
-                return self[key]
-
-            def __setattr__(self, key, value):
-                self[key] = value
-
-        # Return processor output with tensor values
-        result = ProcessorOutput()
-        if text:
-            result["input_ids"] = [MockTensor(list(range(len(text.split()))))]
-        if images:
-            result["pixel_values"] = MockTensor([[1, 2, 3]])
-
-        return result
-
-    def batch_decode(self, token_ids, **kwargs):
-        """Decode token ids to text."""
-        return [f"decoded_{i}" for i in range(len(token_ids))]
-
-
 class TestMultimodalUtils:
     """Test multimodal utility functions."""
 
@@ -152,11 +94,287 @@ class TestMultimodalUtils:
         formatted = MultimodalHandler.format_openai_messages(prompts, images)
         assert formatted == prompts
 
+    def test_format_openai_messages_edge_cases(self):
+        """Test edge cases for format_openai_messages."""
+        # Test with empty images list for conversation with placeholders
+        prompts = [
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "test"}, {"type": "image"}],
+                }
+            ]
+        ]
+        # Empty images list will cause StopIteration when trying to get image
+        with pytest.raises(StopIteration):
+            MultimodalHandler.format_openai_messages(prompts, [[]])
+
+        # Test with mismatched number of images and placeholders
+        img = Image.new("RGB", (10, 10), color="red")
+
+        # More placeholders than images - will raise StopIteration
+        prompts_multi = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "test"},
+                        {"type": "image"},
+                        {"type": "image"},  # Two placeholders
+                    ],
+                }
+            ]
+        ]
+        images_single = [[img]]  # Only one image
+
+        # Should raise StopIteration when trying to get second image
+        with pytest.raises(StopIteration):
+            MultimodalHandler.format_openai_messages(prompts_multi, images_single)
+
+        # More images than placeholders - extra images ignored
+        prompts_single = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "test"},
+                        {"type": "image"},  # One placeholder
+                    ],
+                }
+            ]
+        ]
+        images_multi = [[img, img]]  # Two images
+
+        # Should only use first image, second is ignored
+        formatted = MultimodalHandler.format_openai_messages(
+            prompts_single, images_multi
+        )
+        assert len(formatted[0][0]["content"]) == 2
+        assert formatted[0][0]["content"][1]["type"] == "image_url"
+        assert formatted[0][0]["content"][1]["image_url"]["url"].startswith(
+            "data:image/"
+        )
+
+    def test_extract_text_from_multimodal_content(self):
+        """Test text extraction from multimodal content."""
+        # Simple string content
+        assert (
+            MultimodalHandler.extract_text_from_multimodal_content("Hello") == "Hello"
+        )
+
+        # List with text items - returns only first text item
+        content = [
+            {"type": "text", "text": "Part 1"},
+            {"type": "image"},
+            {"type": "text", "text": "Part 2"},
+        ]
+        assert (
+            MultimodalHandler.extract_text_from_multimodal_content(content) == "Part 1"
+        )
+
+        # Text item not first
+        content_text_second = [
+            {"type": "image"},
+            {"type": "text", "text": "Found text"},
+        ]
+        assert (
+            MultimodalHandler.extract_text_from_multimodal_content(content_text_second)
+            == "Found text"
+        )
+
+        # Empty content
+        assert MultimodalHandler.extract_text_from_multimodal_content([]) == ""
+
+        # Content without text
+        content_no_text = [{"type": "image"}, {"type": "other"}]
+        assert (
+            MultimodalHandler.extract_text_from_multimodal_content(content_no_text)
+            == ""
+        )
+
+        # None content
+        assert MultimodalHandler.extract_text_from_multimodal_content(None) == ""
+
+    def test_extract_images_from_batch(self):
+        """Test image extraction from batches."""
+        img1 = Image.new("RGB", (10, 10), color="red")
+        img2 = Image.new("RGB", (10, 10), color="blue")
+
+        # Normal batch with images - batch is a list of items
+        batch = [
+            {"images": [img1], "prompt": "test1"},
+            {"images": [img2], "prompt": "test2"},
+        ]
+        images = MultimodalHandler.extract_images_from_batch(batch)
+        assert images == [[img1], [img2]]
+
+        # Batch without images key
+        batch_no_images = [
+            {"prompt": "test", "answer": "test"},
+            {"prompt": "test2", "answer": "test2"},
+        ]
+        images = MultimodalHandler.extract_images_from_batch(batch_no_images)
+        assert images is None
+
+        # Mixed batch - some with images, some without
+        batch_mixed = [
+            {"images": [img1], "prompt": "test1"},
+            {"prompt": "test2", "answer": "test2"},
+        ]
+        images = MultimodalHandler.extract_images_from_batch(batch_mixed)
+        assert images == [[img1], []]
+
+        # Empty batch
+        batch_empty = []
+        images = MultimodalHandler.extract_images_from_batch(batch_empty)
+        assert images is None
+
+    def test_pil_to_data_url_edge_cases(self):
+        """Test PIL to data URL conversion edge cases."""
+        # Test with different image modes
+        img_rgba = Image.new("RGBA", (10, 10), color=(255, 0, 0, 128))
+        data_url = MultimodalHandler.pil_to_data_url(img_rgba)
+        assert data_url.startswith("data:image/png;base64,")
+
+        # Test with grayscale
+        img_gray = Image.new("L", (10, 10), color=128)
+        data_url = MultimodalHandler.pil_to_data_url(img_gray)
+        assert data_url.startswith("data:image/png;base64,")
+
+        # Test with very small image
+        img_tiny = Image.new("RGB", (1, 1), color="white")
+        data_url = MultimodalHandler.pil_to_data_url(img_tiny)
+        assert data_url.startswith("data:image/png;base64,")
+
+        # Test format parameter
+        img = Image.new("RGB", (10, 10), color="green")
+        data_url_jpeg = MultimodalHandler.pil_to_data_url(img, fmt="JPEG")
+        data_url_png = MultimodalHandler.pil_to_data_url(img, fmt="PNG")
+        assert data_url_jpeg.startswith("data:image/jpeg;base64,")
+        assert data_url_png.startswith("data:image/png;base64,")
+        assert (
+            data_url_jpeg != data_url_png
+        )  # Different formats should produce different results
+
+
+class TestProcessorWrapper:
+    """Test ProcessorWrapper functionality."""
+
+    def test_processor_wrapper_with_tokenizer(self, mock_tokenizer):
+        """Test ProcessorWrapper with a regular tokenizer."""
+        from verifiers.utils.processor_utils import ProcessorWrapper
+
+        # Create wrapper
+        wrapper = ProcessorWrapper(mock_tokenizer)
+
+        # Should initially be None
+        assert wrapper.pad_token is None
+
+        # Call ensure_pad_token
+        wrapper.ensure_pad_token()
+
+        # Check pad token was set
+        assert wrapper.pad_token == "</s>"
+        assert wrapper.pad_token_id == 2
+
+        # Test method delegation
+        result = wrapper.apply_chat_template([{"role": "user", "content": "test"}])
+        assert result == [1, 2, 3]
+        mock_tokenizer.apply_chat_template.assert_called_once()
+
+        result = wrapper.encode("test")
+        assert result == [4, 5, 6]
+        mock_tokenizer.encode.assert_called_once()
+
+        # Test property access
+        assert wrapper.eos_token == "</s>"
+        assert wrapper.eos_token_id == 2
+
+    def test_processor_wrapper_with_processor(self, mock_processor):
+        """Test ProcessorWrapper with a multimodal processor."""
+        from verifiers.utils.processor_utils import ProcessorWrapper
+
+        # Create wrapper
+        wrapper = ProcessorWrapper(mock_processor)
+
+        # Test tokenizer access
+        assert hasattr(wrapper, "tokenizer")
+        assert wrapper.tokenizer is mock_processor.tokenizer
+
+        # Test chat template access through processing_class
+        assert hasattr(wrapper.processing_class, "chat_template")
+        assert wrapper.processing_class.chat_template == "test_template"
+
+        # Test apply_chat_template
+        messages = [{"role": "user", "content": "Hello"}]
+        result = wrapper.apply_chat_template(messages)
+        assert result == "user: Hello"
+
+        # Test callable functionality
+        img = Image.new("RGB", (10, 10), color="red")
+        result = wrapper("test text", images=[img])
+        assert "input_ids" in result
+        assert "pixel_values" in result
+
+    def test_processor_wrapper_pad_token_handling(self, mock_tokenizer, mock_processor):
+        """Test ProcessorWrapper pad token handling."""
+        from verifiers.utils.processor_utils import ProcessorWrapper
+
+        # Use fixture tokenizer that already has pad_token set to None
+        wrapper = ProcessorWrapper(mock_tokenizer)
+        wrapper.ensure_pad_token()
+        assert wrapper.pad_token == "</s>"  # Should be set to eos_token
+        assert wrapper.pad_token_id == 2
+
+        # Test with a tokenizer that has pad_token
+        mock_tokenizer_with_pad = MagicMock()
+        mock_tokenizer_with_pad.pad_token = "[PAD]"
+        mock_tokenizer_with_pad.pad_token_id = 0
+        from transformers import PreTrainedTokenizerBase
+
+        mock_tokenizer_with_pad.__class__ = type(
+            "MockTokenizer", (PreTrainedTokenizerBase,), {}
+        )
+
+        wrapper2 = ProcessorWrapper(mock_tokenizer_with_pad)
+        assert wrapper2.pad_token == "[PAD]"
+        assert wrapper2.pad_token_id == 0
+
+        # Test with processor fixture
+        wrapper3 = ProcessorWrapper(mock_processor)
+        wrapper3.ensure_pad_token()
+        assert mock_processor.tokenizer.pad_token == "</s>"  # Should be set
+        assert wrapper3.pad_token == "</s>"
+        assert wrapper3.pad_token_id == 2
+
+    def test_processor_wrapper_attribute_access(self, mock_tokenizer):
+        """Test ProcessorWrapper attribute access and delegation."""
+        from verifiers.utils.processor_utils import ProcessorWrapper
+
+        # Add custom method to mock tokenizer
+        mock_tokenizer.custom_method = MagicMock(return_value="custom result")
+
+        wrapper = ProcessorWrapper(mock_tokenizer)
+
+        # Test tokenizer attribute access (these are on the tokenizer, not the wrapper)
+        assert wrapper.tokenizer.vocab_size == 32000
+        assert wrapper.tokenizer.model_max_length == 2048
+
+        # Test method delegation on tokenizer
+        result = wrapper.tokenizer.custom_method("arg")
+        assert result == "custom result"
+        mock_tokenizer.custom_method.assert_called_once_with("arg")
+
+        # Test hasattr on tokenizer
+        assert hasattr(wrapper.tokenizer, "vocab_size")
+        assert hasattr(wrapper.tokenizer, "custom_method")
+        assert not hasattr(wrapper.tokenizer, "non_existent_attr")
+
 
 class TestMultimodalEnvironment:
     """Test multimodal support in Environment class."""
 
-    def test_process_chat_format_with_images(self):
+    def test_process_chat_format_with_images(self, mock_processor):
         """Test processing chat format with images."""
         # Create test environment
         dataset = Dataset.from_dict(
@@ -168,9 +386,6 @@ class TestMultimodalEnvironment:
         )
 
         env = SingleTurnEnv(dataset=dataset, parser=Parser(), rubric=Rubric())
-
-        # Create mock processor
-        mock_processor = MockProcessor()
 
         prompt = [{"role": "user", "content": "What is this?"}]
         images = [Image.new("RGB", (10, 10), color="blue")]
@@ -191,7 +406,7 @@ class TestMultimodalEnvironment:
         assert "pixel_values" in remaining_inputs
         assert remaining_inputs["pixel_values"] is not None
 
-    def test_process_env_results_multimodal(self):
+    def test_process_env_results_multimodal(self, mock_processor):
         """Test processing environment results with multimodal data."""
         # Create test environment
         dataset = Dataset.from_dict(
@@ -199,9 +414,6 @@ class TestMultimodalEnvironment:
         )
 
         env = SingleTurnEnv(dataset=dataset, parser=Parser(), rubric=Rubric())
-
-        # Create mock processor
-        mock_processor = MockProcessor()
 
         # Create test data
         prompts = [[{"role": "user", "content": "What is this?"}]]
@@ -267,7 +479,9 @@ class TestAsyncBatchGeneratorMultimodal:
         return env
 
     @pytest.mark.asyncio
-    async def test_generate_batch_with_images(self, mock_env_multimodal):
+    async def test_generate_batch_with_images(
+        self, mock_env_multimodal, mock_processor
+    ):
         """Test async batch generation with images."""
         client_config = {
             "base_url": "http://test",
@@ -286,7 +500,7 @@ class TestAsyncBatchGeneratorMultimodal:
         request = BatchRequest(
             batch_id=0,
             env_inputs={"prompt": [[{"role": "user", "content": "test"}]]},
-            processing_class=MockProcessor(),
+            processing_class=mock_processor,
             mask_env_responses=False,
             max_seq_len=100,
             mask_truncated_completions=False,
@@ -367,13 +581,15 @@ class TestMultimodalIntegration:
         )
 
         # Check that data collator was applied to the eval_dataset
-        # The eval_dataset should now have images column
-        assert "images" in env.eval_dataset.column_names
+        # Since set_transform is used, the column won't appear in column_names
+        # but will be present when we access the data
         assert len(env.eval_dataset) == 2
 
-        # Verify the images were added correctly
-        assert len(env.eval_dataset["images"][0]) == 1
-        assert isinstance(env.eval_dataset["images"][0][0], Image.Image)
+        # Access a sample to trigger the transform
+        sample = env.eval_dataset[0]
+        assert "images" in sample
+        assert len(sample["images"]) == 1
+        assert isinstance(sample["images"][0], Image.Image)
 
     @pytest.mark.asyncio
     async def test_multimodal_generation_flow(self, mock_openai_client):

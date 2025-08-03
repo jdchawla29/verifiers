@@ -337,3 +337,128 @@ def mock_multiturn_env_max_turns(mock_openai_client, sample_chat_dataset):
         parser=Parser(),
         rubric=Rubric(),
     )
+
+
+# Multimodal test fixtures
+
+
+@pytest.fixture
+def mock_processor():
+    """Return a mock multimodal processor for testing."""
+    from transformers import ProcessorMixin
+
+    class MockProcessor(ProcessorMixin):
+        """Mock processor that mimics AutoProcessor behavior."""
+
+        def __init__(self):
+            # Configure tokenizer mock with side effect
+            tokenizer_attrs = {
+                "pad_token": None,
+                "pad_token_id": None,
+                "eos_token": "</s>",
+                "eos_token_id": 2,
+                "vocab_size": 32000,
+                "model_max_length": 2048,
+            }
+
+            # Create a special MagicMock that updates pad_token_id when pad_token is set
+            class TokenizerMock(MagicMock):
+                def __setattr__(self, name, value):
+                    super().__setattr__(name, value)
+                    if name == "pad_token" and value == self.eos_token:
+                        self.pad_token_id = self.eos_token_id
+
+            self.tokenizer = TokenizerMock()
+            self.tokenizer.configure_mock(**tokenizer_attrs)
+            self.tokenizer.encode.side_effect = lambda text: list(
+                range(len(text.split()))
+            )
+            self.tokenizer.apply_chat_template.side_effect = (
+                lambda messages, **kwargs: " ".join(
+                    [f"{msg['role']}: {msg['content']}" for msg in messages]
+                )
+            )
+            self.chat_template = "test_template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            """Apply chat template - processors have this method directly."""
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+
+        def __call__(self, text=None, images=None, return_tensors=None, **kwargs):
+            """Process text and images like a real processor."""
+
+            # Mock tensor class
+            class MockTensor:
+                def __init__(self, data):
+                    self._data = data
+
+                def tolist(self):
+                    return self._data
+
+                def __getitem__(self, idx):
+                    return self
+
+            # Create a dict-like object that also supports attribute access
+            class ProcessorOutput(dict):
+                def __getattr__(self, key):
+                    return self[key]
+
+                def __setattr__(self, key, value):
+                    self[key] = value
+
+            # Return processor output with tensor values
+            result = ProcessorOutput()
+            if text:
+                result["input_ids"] = [MockTensor(list(range(len(text.split()))))]
+            if images:
+                result["pixel_values"] = MockTensor([[1, 2, 3]])
+
+            return result
+
+        def batch_decode(self, token_ids, **kwargs):
+            """Decode token ids to text."""
+            return [f"decoded_{i}" for i in range(len(token_ids))]
+
+    return MockProcessor()
+
+
+@pytest.fixture
+def mock_tokenizer():
+    """Return a mock tokenizer for testing."""
+    from transformers import PreTrainedTokenizerBase
+
+    class MockTokenizer(PreTrainedTokenizerBase):
+        """Mock tokenizer that inherits from PreTrainedTokenizerBase."""
+
+        def __init__(self, **kwargs):
+            # Initialize with minimal required attributes
+            self._pad_token = kwargs.get("pad_token", None)
+            self._pad_token_id = kwargs.get("pad_token_id", None)
+            self.eos_token = kwargs.get("eos_token", "</s>")
+            self.eos_token_id = kwargs.get("eos_token_id", 2)
+            self.vocab_size = kwargs.get("vocab_size", 32000)
+            self.model_max_length = kwargs.get("model_max_length", 2048)
+            # special_tokens_map is a property, can't set directly
+
+            # Add mock methods
+            self.apply_chat_template = MagicMock(return_value=[1, 2, 3])
+            self.encode = MagicMock(return_value=[4, 5, 6])
+            self.decode = MagicMock(return_value="decoded text")
+            self.batch_decode = MagicMock(return_value=["decoded_0", "decoded_1"])
+
+        @property
+        def pad_token(self):
+            return self._pad_token
+
+        @pad_token.setter
+        def pad_token(self, value):
+            self._pad_token = value
+            # When pad_token is set to eos_token, also update pad_token_id
+            if value == self.eos_token:
+                self._pad_token_id = self.eos_token_id
+
+        @property
+        def pad_token_id(self):
+            return self._pad_token_id
+
+    return MockTokenizer()

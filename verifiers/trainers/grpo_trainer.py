@@ -1177,7 +1177,11 @@ class GRPOTrainer(Trainer):
             advantages = all_advantages[process_slice]
 
             # slice remaining inputs
-            remaining_inputs = broadcast_data["remaining_inputs"][process_slice]
+            if broadcast_data["remaining_inputs"]:
+                remaining_inputs = broadcast_data["remaining_inputs"][process_slice]
+            else:
+                # If remaining_inputs is empty, create a list of None with correct length
+                remaining_inputs = [None] * (process_slice.stop - process_slice.start)
             # Log metrics on main process only
             if self.accelerator.is_main_process:
                 self._log_reward_metrics_primary(

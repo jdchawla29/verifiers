@@ -25,7 +25,7 @@ from openai.types.shared_params import (  # noqa: F401
     FunctionDefinition,
     FunctionParameters,
 )
-from pydantic import BaseModel, SkipValidation
+from pydantic import BaseModel, SkipValidation, ConfigDict
 from PIL import Image
 
 # typing aliases
@@ -59,6 +59,8 @@ class GenerateInputs(BaseModel):
 
 class GenerateOutputs(BaseModel):
     """Pydantic model for generation outputs."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     prompt: List[Messages]
     completion: List[Messages]

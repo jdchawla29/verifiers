@@ -1403,6 +1403,29 @@ class GRPOTrainer(Trainer):
                 msg.pop("tool_call_id")
         return completion
 
+    def _sanitize_multimodal_prompt(self, prompt: Any) -> str:
+        """Convert multimodal prompt to text representation for wandb logging."""
+        if isinstance(prompt, list) and len(prompt) > 0:
+            text_parts = []
+            for msg in prompt:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Extract text from multimodal content
+                        text_content = ""
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_content += item.get("text", "")
+                            elif isinstance(item, dict) and item.get("type") == "image":
+                                text_content += " [IMAGE]"
+                        text_parts.append(f"{role}: {text_content}")
+                    elif isinstance(content, str):
+                        text_parts.append(f"{role}: {content}")
+            return "\n".join(text_parts)
+        else:
+            return str(prompt)
+
     def evaluate(
         self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", **kwargs
     ):
@@ -1417,6 +1440,12 @@ class GRPOTrainer(Trainer):
             return {}
 
         self.logger.info("Running evaluation using environment's evaluate method")
+
+        # Start async generator if not started (needed for eval at step 0)
+        if not self._async_started and self.accelerator.is_main_process:
+            self.async_generator.start()
+            self._async_started = True
+        self.accelerator.wait_for_everyone()
 
         # Only the main process computes evaluation to avoid duplicate work
         if self.accelerator.is_main_process:
@@ -1529,7 +1558,7 @@ class GRPOTrainer(Trainer):
                             prompt.append([{"role": "user", "content": content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
-                    "prompt": prompts,
+                    "prompt": [self._sanitize_multimodal_prompt(p) for p in prompts],
                     "completion": [
                         self._sanitize_tool_calls(c)  # type: ignore
                         for c in completions

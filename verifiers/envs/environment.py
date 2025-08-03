@@ -807,6 +807,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         state: State,
         processing_class: "PreTrainedTokenizerBase",
         mask_env_responses: bool = False,
+        images: Optional[List[Image.Image]] = None,
     ) -> Tuple[List[int], List[int], List[int], List[int], List[float]]:
         """
         Process chat format conversations using incremental prefixes.
@@ -822,10 +823,23 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                 zipped.append((turn, None))
         assert len(responses) == responses_idx, "Responses not fully consumed"
         assert len(zipped) == len(completion), "Length mismatch"
-        prompt_ids: list[int] = processing_class.apply_chat_template(
-            conversation=prompt,  # type: ignore
-            add_generation_prompt=True,
-        )
+        if images:
+            # Handle multimodal case with processor
+            assert not isinstance(processing_class, PreTrainedTokenizerBase)
+            prompt_text = processing_class.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
+            assert isinstance(prompt_text, str)
+            inputs = processing_class(
+                text=prompt_text, images=images, return_tensors="pt"
+            )
+            prompt_ids = inputs.input_ids[0].tolist()
+        else:
+            # Regular tokenizer case
+            prompt_ids: list[int] = processing_class.apply_chat_template(
+                conversation=prompt,  # type: ignore
+                add_generation_prompt=True,
+            )
         messages_consumed = deepcopy(prompt)
         prompt_mask: list[int] = [0] * len(prompt_ids)
         completion_ids: list[int] = []
@@ -895,6 +909,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         mask_env_responses: bool = False,
         mask_truncated_completions: bool = False,
         zero_truncated_completions: bool = False,
+        images: Optional[List[List[Image.Image]]] = None,
     ) -> ProcessedOutputs:
         """
         Process results with vLLM tokens/logprobs.
@@ -911,8 +926,11 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         all_completion_masks = []
         all_completion_logprobs = []
         all_rewards = []
-        for i, (prompt, completion, state, reward) in enumerate(
-            zip(prompts, completions, states, rewards)
+        # Handle images list
+        input_images = images if images is not None else [[] for _ in prompts]
+        
+        for i, (prompt, completion, state, reward, img) in enumerate(
+            zip(prompts, completions, states, rewards, input_images)
         ):
             # Format-specific processing
             if is_chat_format:
@@ -924,7 +942,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                     completion_mask,
                     completion_logprobs,
                 ) = self.process_chat_format_vllm(
-                    prompt, completion, state, processing_class, mask_env_responses
+                    prompt, completion, state, processing_class, mask_env_responses, img
                 )
             else:
                 assert isinstance(prompt, str) and isinstance(completion, str)

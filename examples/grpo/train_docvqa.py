@@ -51,14 +51,16 @@ def main():
     EVAL_SAMPLES = args.eval_samples
     MAX_STEPS = 200
     EVAL_STEPS = 20
-    BATCH_SIZE = 2
+    BATCH_SIZE = 4
     GRADIENT_ACCUMULATION_STEPS = 4
-    NUM_GENERATIONS = 4
+    NUM_GENERATIONS = 8
 
-    # Load environment - it already has a proper data collator
     vf_env = load_environment(
         num_train_examples=TRAIN_SAMPLES, num_eval_examples=EVAL_SAMPLES
     )
+    
+    # Since we're using set_transform, we don't need the data_collator in trainer
+    vf_env.data_collator = None
 
     # Load model and processor
     model, processor = vf.get_model_and_tokenizer(MODEL_NAME)
@@ -68,11 +70,12 @@ def main():
     training_args = vf.grpo_defaults(run_name=run_name)
 
     # Customize training arguments
-    training_args.learning_rate = 1e-6  # Lower LR for vision models
+    training_args.learning_rate = 1e-6
     training_args.max_steps = MAX_STEPS
     training_args.eval_strategy = "steps"
     training_args.eval_steps = EVAL_STEPS
     training_args.save_steps = EVAL_STEPS
+    training_args.eval_on_start = True  # Run evaluation at step 0
     training_args.gradient_checkpointing_kwargs = {
         "use_reentrant": False,
     }
@@ -81,15 +84,18 @@ def main():
     training_args.num_generations = NUM_GENERATIONS
     training_args.per_device_train_batch_size = BATCH_SIZE
     training_args.gradient_accumulation_steps = GRADIENT_ACCUMULATION_STEPS
+    # Don't set generation_batch_size explicitly - let it be calculated automatically
+    # It will be: per_device_train_batch_size * num_processes * gradient_accumulation_steps
+    # = 4 * 4 * 4 = 64 unique prompts
+    # Total rollouts = 64 * 8 = 512
 
-    # Memory optimization for multimodal training
-    training_args.fp16 = True
-    training_args.optim = "adamw_8bit"
     training_args.gradient_checkpointing = True
 
     # Generation settings
     training_args.temperature = 0.7
-    training_args.max_tokens = 200  # GRPO uses max_tokens, not max_new_tokens
+    training_args.max_tokens = 200
+    # Increase max_seq_len to accommodate multimodal inputs
+    training_args.max_seq_len = 6144  # Balance between context and memory usage
 
     # Create trainer
     trainer = vf.GRPOTrainer(

@@ -58,7 +58,7 @@ def main():
     vf_env = load_environment(
         num_train_examples=TRAIN_SAMPLES, num_eval_examples=EVAL_SAMPLES
     )
-    
+
     # Since we're using set_transform, we don't need the data_collator in trainer
     vf_env.data_collator = None
 

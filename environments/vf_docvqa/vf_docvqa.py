@@ -1,5 +1,5 @@
 import verifiers as vf
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 
 
 def load_environment(num_train_examples=-1, num_eval_examples=-1):

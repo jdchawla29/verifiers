@@ -383,8 +383,10 @@ class Environment(ABC):
             results_dict = deepcopy(inputs[:])
             # Handle info column specially to ensure mutable dicts
             if "info" in results_dict:
-                results_dict["info"] = [dict(item) if isinstance(item, dict) else item 
-                                       for item in results_dict["info"]]
+                results_dict["info"] = [
+                    dict(item) if isinstance(item, dict) else item
+                    for item in results_dict["info"]
+                ]
         else:
             results_dict = {col: deepcopy(inputs[col]) for col in inputs}
         if "prompt" not in results_dict:
@@ -928,7 +930,7 @@ Model copies with swapped templates are available here: https://huggingface.co/c
         all_rewards = []
         # Handle images list
         input_images = images if images is not None else [[] for _ in prompts]
-        
+
         for i, (prompt, completion, state, reward, img) in enumerate(
             zip(prompts, completions, states, rewards, input_images)
         ):

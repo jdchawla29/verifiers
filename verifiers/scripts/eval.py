@@ -70,8 +70,6 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
         max_concurrent_requests=max_concurrent_requests,
     )
 
-    print("results:", results)
-
     print("--- Evaluation ---")
     print(f"Environment: {env}")
     print(f"Model: {model}")

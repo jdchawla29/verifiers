@@ -90,7 +90,7 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
     r = rollouts_per_example
     for i in range(r):
         # rounded to 3 decimal places
-        trials = [round(results.reward[(j * r) + i], 3) for j in range(n)]
+        trials = [round(results.reward[(i * n) + j], 3) for j in range(n)]
         out = f"r{i + 1}: {trials}"
         print(out)
     for k in results.metrics:
@@ -98,7 +98,7 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
         print(f"{k}: avg - {sum(v) / len(v):.3f}, std - {np.std(v):.3f}")
         for i in range(r):
             # rounded to 3 decimal places
-            trials = [round(v[(j * r) + i], 3) for j in range(n)]
+            trials = [round(v[(i * n) + j], 3) for j in range(n)]
             out = f"r{i + 1}: {trials}"
             print(out)
     if save_dataset:

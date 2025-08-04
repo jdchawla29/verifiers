@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 
 from verifiers.types import Messages
+from verifiers.utils.multimodal_utils import MultimodalHandler
 
 
 def setup_logging(
@@ -81,16 +82,9 @@ def print_prompt_completions_sample(
             if prompt:
                 last_message = prompt[-1]
                 content = last_message.get("content", "")
-                if isinstance(content, list):  # multimodal case
-                    # Extract text from multimodal content
-                    text_content = ""
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text_content = item.get("text", "")
-                            break
-                    content = text_content
-                else:
-                    content = str(content)
+                content = MultimodalHandler.extract_text_from_multimodal_content(
+                    content
+                )
                 formatted_prompt = Text(content, style="bright_yellow")
             else:
                 formatted_prompt = Text("")
@@ -104,6 +98,7 @@ def print_prompt_completions_sample(
             # Handle single message dict
             role = completion.get("role", "")
             content = completion.get("content", "")
+            content = MultimodalHandler.extract_text_from_multimodal_content(content)
             style = "bright_cyan" if role == "assistant" else "bright_magenta"
             formatted_completion.append(f"{role}: ", style="bold")
             formatted_completion.append(content, style=style)
@@ -114,7 +109,10 @@ def print_prompt_completions_sample(
                     formatted_completion.append("\n\n")
 
                 role = message.get("role", "")
-                content = str(message.get("content", ""))
+                content = message.get("content", "")
+                content = MultimodalHandler.extract_text_from_multimodal_content(
+                    content
+                )
                 tool_calls = message.get("tool_calls", [])
 
                 # Set style based on role

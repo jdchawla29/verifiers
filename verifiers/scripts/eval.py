@@ -78,9 +78,13 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
     print(f"Rollouts per example: {rollouts_per_example}")
 
     print("--- Example ---")
-    vf.print_prompt_completions_sample(
-        results.prompt, results.completion, results.reward, step=0
-    )
+    try:
+        vf.print_prompt_completions_sample(
+            results.prompt, results.completion, results.reward, step=0
+        )
+    except AttributeError:
+        # Skip if rich is not installed
+        pass
     print("--- All ---")
     print("Rewards:")
     print(

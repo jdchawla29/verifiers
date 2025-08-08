@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 
 from verifiers.parsers.parser import Parser
 from verifiers.rubrics.rubric import Rubric

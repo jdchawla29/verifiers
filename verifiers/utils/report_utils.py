@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha1
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import numpy as np
 from jinja2 import BaseLoader, Environment, StrictUndefined, select_autoescape
@@ -24,8 +24,8 @@ class ReportMeta:
     num_examples: int
     rollouts_per_example: int
     api_base_url: str
-    sampling_args: Dict[str, Any]
-    env_args: Dict[str, Any]
+    sampling_args: dict[str, Any]
+    env_args: dict[str, Any]
 
 
 def get_env_version(module_name: str) -> str:
@@ -62,7 +62,7 @@ def _trim_snippet(text: str, max_chars: int = 300) -> str:
     return text[: max_chars - 1] + "…"
 
 
-def _compute_basic_stats(values: List[float]) -> Dict[str, float]:
+def _compute_basic_stats(values: list[float]) -> dict[str, float]:
     arr = np.array(values, dtype=float)
     if arr.size == 0:
         return {"mean": float("nan"), "std": float("nan"), "n": 0}
@@ -74,8 +74,8 @@ def _compute_basic_stats(values: List[float]) -> Dict[str, float]:
 
 
 def _compute_percentiles(
-    values: List[float], percentiles: Tuple[int, ...] = (5, 25, 50, 75, 95)
-) -> Dict[str, float]:
+    values: list[float], percentiles: tuple[int, ...] = (5, 25, 50, 75, 95)
+) -> dict[str, float]:
     arr = np.array(values, dtype=float)
     if arr.size == 0:
         return {f"p{p}": float("nan") for p in percentiles}
@@ -83,18 +83,18 @@ def _compute_percentiles(
     return {f"p{p}": float(q) for p, q in zip(percentiles, qs)}
 
 
-def compute_summary(results: GenerateOutputs) -> Dict[str, Any]:
+def compute_summary(results: GenerateOutputs) -> dict[str, Any]:
     """Compute aggregated statistics from GenerateOutputs in a format usable by templates.
 
     This function intentionally does not change layout based on dataset size.
     """
-    summary: Dict[str, Any] = {}
+    summary: dict[str, Any] = {}
 
     reward_stats = _compute_basic_stats(results.reward)
     reward_percentiles = _compute_percentiles(results.reward)
     summary["reward"] = {**reward_stats, **reward_percentiles}
 
-    metric_summaries: Dict[str, Dict[str, float]] = {}
+    metric_summaries: dict[str, dict[str, float]] = {}
     for metric_name, metric_values in results.metrics.items():
         metric_summaries[metric_name] = {
             **_compute_basic_stats(metric_values),
@@ -107,14 +107,14 @@ def compute_summary(results: GenerateOutputs) -> Dict[str, Any]:
 
 def build_examples(
     results: GenerateOutputs, cap: int = DETAILED_EXAMPLES_CAP
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Prepare a capped list of example rows for rendering.
 
     Each row contains: index, reward, optional first metric column, and a completion snippet.
     """
     num = min(len(results.reward), cap)
     metric_first_name = next(iter(results.metrics.keys()), None)
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for i in range(num):
         completion_snippet = _safe_last_assistant_text(results.completion[i])
         row = {
@@ -130,7 +130,7 @@ def build_examples(
     return rows
 
 
-def _hash_env_args(env_args: Dict[str, Any]) -> str:
+def _hash_env_args(env_args: dict[str, Any]) -> str:
     if not env_args:
         return "noargs"
     # Stable JSON-like representation for hashing
@@ -249,8 +249,8 @@ _env = Environment(
 
 def render_html(
     meta: ReportMeta,
-    summary: Dict[str, Any],
-    examples: List[Dict[str, Any]],
+    summary: dict[str, Any],
+    examples: list[dict[str, Any]],
     total_examples: int,
 ) -> str:
     template = _env.from_string(_TEMPLATE)

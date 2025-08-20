@@ -2,12 +2,12 @@
 
 import base64
 import io
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PIL import Image
 
 
-def pil_to_data_url(img: Image.Image, fmt: Optional[str] = None) -> str:
+def pil_to_data_url(img: Image.Image, fmt: str | None = None) -> str:
     """Convert PIL Image to data URL for multimodal inputs.
 
     Args:
@@ -25,8 +25,8 @@ def pil_to_data_url(img: Image.Image, fmt: Optional[str] = None) -> str:
 
 
 def format_openai_messages(
-    prompts: List[List[Any]], images: List[List[Image.Image]]
-) -> List[Any]:
+    prompts: list[list[Any]], images: list[list[Image.Image]]
+) -> list[Any]:
     """Format multimodal chat messages for OpenAI API.
 
     Args:
@@ -86,7 +86,7 @@ def extract_text_from_multimodal_content(content: Any) -> str:
     return ""
 
 
-def has_images(batch: List[Dict[str, Any]]) -> bool:
+def has_images(batch: list[dict[str, Any]]) -> bool:
     """Check if a batch contains images.
 
     Args:
@@ -99,8 +99,8 @@ def has_images(batch: List[Dict[str, Any]]) -> bool:
 
 
 def extract_images_from_batch(
-    batch: List[Dict[str, Any]],
-) -> Optional[List[List[Image.Image]]]:
+    batch: list[dict[str, Any]],
+) -> list[list[Image.Image]] | None:
     """Extract images from a batch if present.
 
     Args:

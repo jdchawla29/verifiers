@@ -31,8 +31,10 @@ from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
 from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.utils.model_utils import generic_model_loader
-from verifiers.utils.processor_utils import ProcessorWrapper
-from verifiers.utils.multimodal_utils import MultimodalHandler
+from verifiers.utils.image_utils import (
+    extract_images_from_batch,
+    extract_text_from_multimodal_content,
+)
 
 
 class RepeatSampler(Sampler):
@@ -282,9 +284,17 @@ class GRPOTrainer(Trainer):
         # Suppress irrelevant warning
         model.warnings_issued["estimate_tokens"] = True
 
-        # Wrap processing class for unified interface
-        self.processor_wrapper = ProcessorWrapper(processing_class)
-        self.processor_wrapper.ensure_pad_token()
+        # Store processing class and ensure pad token
+        self.processing_class = processing_class
+
+        # Ensure pad token is set
+        if isinstance(processing_class, ProcessorMixin):
+            tokenizer = processing_class.tokenizer
+        else:
+            tokenizer = processing_class
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
         # Training arguments
         self.per_device_train_batch_size = args.per_device_train_batch_size
@@ -406,13 +416,23 @@ class GRPOTrainer(Trainer):
                 # Tokenize prompt to check length
                 if isinstance(prompt, list):
                     # Chat format
-                    prompt_text = self.processor_wrapper.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
+                    if isinstance(self.processing_class, ProcessorMixin):
+                        prompt_text = (
+                            self.processing_class.tokenizer.apply_chat_template(
+                                prompt, tokenize=False, add_generation_prompt=True
+                            )
+                        )
+                    else:
+                        prompt_text = self.processing_class.apply_chat_template(
+                            prompt, tokenize=False, add_generation_prompt=True
+                        )
                 else:
                     # Completion format
                     prompt_text = prompt
-                prompt_ids = self.processor_wrapper.encode(prompt_text)  # type: ignore
+                if isinstance(self.processing_class, ProcessorMixin):
+                    prompt_ids = self.processing_class.tokenizer.encode(prompt_text)  # type: ignore
+                else:
+                    prompt_ids = self.processing_class.encode(prompt_text)  # type: ignore
                 return len(prompt_ids) <= max_length
 
             original_size = len(train_dataset)
@@ -972,7 +992,7 @@ class GRPOTrainer(Trainer):
 
         # Gather batch data from all processes
         prompts = [x["prompt"] for x in batch]
-        images = MultimodalHandler.extract_images_from_batch(batch)
+        images = extract_images_from_batch(batch)
         answers = [x["answer"] for x in batch]
         tasks = [x.get("task", "default") for x in batch]
         infos = [x.get("info", {}) for x in batch]
@@ -1160,7 +1180,10 @@ class GRPOTrainer(Trainer):
                 )
 
             # Pad sequences
-            pad_token_id = self.processor_wrapper.pad_token_id
+            if isinstance(self.processing_class, ProcessorMixin):
+                pad_token_id = self.processing_class.tokenizer.pad_token_id
+            else:
+                pad_token_id = self.processing_class.pad_token_id
 
             input_ids = pad(
                 input_ids_list,
@@ -1492,16 +1515,26 @@ class GRPOTrainer(Trainer):
         if isinstance(completions[0], str):
             # Completion format - directly tokenize strings
             completion_lengths = [
-                len(self.processor_wrapper.encode(c)) for c in completions
+                len(
+                    self.processing_class.tokenizer.encode(c)
+                    if isinstance(self.processing_class, ProcessorMixin)
+                    else self.processing_class.encode(c)
+                )
+                for c in completions
             ]
         else:
             # Chat format - use apply_chat_template
             completion_lengths = []
             for comp in completions:
                 # Apply chat template to get the full text
-                tokens = self.processor_wrapper.apply_chat_template(
-                    comp, tokenize=True, add_generation_prompt=False
-                )
+                if isinstance(self.processing_class, ProcessorMixin):
+                    tokens = self.processing_class.tokenizer.apply_chat_template(
+                        comp, tokenize=True, add_generation_prompt=False
+                    )
+                else:
+                    tokens = self.processing_class.apply_chat_template(
+                        comp, tokenize=True, add_generation_prompt=False
+                    )
                 # Tokenize and count
                 completion_lengths.append(len(tokens))
 
@@ -1550,11 +1583,7 @@ class GRPOTrainer(Trainer):
                             # Chat format
                             last_message = messages[-1]
                             content = last_message.get("content", "")
-                            content = (
-                                MultimodalHandler.extract_text_from_multimodal_content(
-                                    content
-                                )
-                            )
+                            content = extract_text_from_multimodal_content(content)
                             prompt.append([{"role": "user", "content": content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
@@ -1621,11 +1650,7 @@ class GRPOTrainer(Trainer):
                             # Chat format
                             last_message = messages[-1]
                             content = last_message.get("content", "")
-                            content = (
-                                MultimodalHandler.extract_text_from_multimodal_content(
-                                    content
-                                )
-                            )
+                            content = extract_text_from_multimodal_content(content)
                             prompt.append([{"role": "user", "content": content}])
                 table = {
                     "step": [str(self.state.global_step)]
@@ -1735,7 +1760,10 @@ class GRPOTrainer(Trainer):
 
         # Check for EOS tokens
         term_lengths = []
-        eos_token_id = self.processor_wrapper.eos_token_id
+        if isinstance(self.processing_class, ProcessorMixin):
+            eos_token_id = self.processing_class.tokenizer.eos_token_id
+        else:
+            eos_token_id = self.processing_class.eos_token_id
         for comp_ids, comp_mask in zip(all_completion_ids, all_completion_mask):
             has_eos = any(
                 token == eos_token_id  # type: ignore

@@ -28,7 +28,7 @@ from verifiers.types import (
     SamplingArgs,
     State,
 )
-from verifiers.utils.multimodal_utils import MultimodalHandler
+from verifiers.utils.image_utils import format_openai_messages
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -220,9 +220,7 @@ class Environment(ABC):
                 images = kwargs.get("images")
                 if images:
                     # Format multimodal messages
-                    formatted_prompts = MultimodalHandler.format_openai_messages(
-                        [prompt], [images]
-                    )
+                    formatted_prompts = format_openai_messages([prompt], [images])
                     prompt = formatted_prompts[0]
 
                 if oai_tools:

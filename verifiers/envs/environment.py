@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from typing import TYPE_CHECKING, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from datasets import Dataset
 from openai import AsyncOpenAI, OpenAI
@@ -568,7 +568,7 @@ class Environment(ABC):
         processing_class: "PreTrainedTokenizerBase",
         mask_env_responses: bool = False,
         images: Optional[list[Image.Image]] = None,
-    ) -> tuple[list[int], list[int], list[int], list[int], list[float]]:
+    ) -> tuple[list[int], list[int], list[int], list[int], list[float], dict[str, Any]]:
         """
         Process chat format conversations using incremental prefixes.
         """
@@ -583,9 +583,13 @@ class Environment(ABC):
                 zipped.append((turn, None))
         assert len(responses) == responses_idx, "Responses not fully consumed"
         assert len(zipped) == len(completion), "Length mismatch"
+        remaining_inputs = {}
         if images:
             # Handle multimodal case with processor
-            assert not isinstance(processing_class, PreTrainedTokenizerBase)
+            # Processors have a 'tokenizer' attribute, tokenizers don't
+            assert hasattr(processing_class, "image_processor"), (
+                "Images provided but processing_class is not a processor"
+            )
             prompt_text = processing_class.apply_chat_template(
                 prompt, tokenize=False, add_generation_prompt=True
             )
@@ -594,6 +598,12 @@ class Environment(ABC):
                 text=prompt_text, images=images, return_tensors="pt"
             )
             prompt_ids = inputs.input_ids[0].tolist()
+            # Extract remaining inputs (e.g., pixel_values) for multimodal models
+            remaining_inputs = {
+                k: v
+                for k, v in inputs.items()
+                if k not in ["input_ids", "attention_mask"]
+            }
         else:
             # Regular tokenizer case
             prompt_ids: list[int] = processing_class.apply_chat_template(
@@ -656,6 +666,7 @@ class Environment(ABC):
             completion_ids,
             completion_mask,
             completion_logprobs,
+            remaining_inputs,
         )
 
     def process_completion_format_vllm(
@@ -665,7 +676,7 @@ class Environment(ABC):
         state: State,
         processing_class: "PreTrainedTokenizerBase",
         mask_env_responses: bool = False,
-    ) -> tuple[list[int], list[int], list[int], list[int], list[float]]:
+    ) -> tuple[list[int], list[int], list[int], list[int], list[float], dict[str, Any]]:
         """
         Process completion format conversations using incremental prefixes.
         """
@@ -725,12 +736,15 @@ class Environment(ABC):
                 completion_logprobs.extend(completion_turn_logprobs)
                 rollout_consumed += text
                 i += 1
+        # Completion format doesn't support multimodal yet
+        remaining_inputs = {}
         return (
             prompt_ids,
             prompt_mask,
             completion_ids,
             completion_mask,
             completion_logprobs,
+            remaining_inputs,
         )
 
     def process_env_results_vllm(
@@ -759,6 +773,7 @@ class Environment(ABC):
         all_completion_masks = []
         all_completion_logprobs = []
         all_rewards = []
+        all_remaining_inputs = []
         # Handle images list
         input_images = images if images is not None else [[] for _ in prompts]
 
@@ -774,6 +789,7 @@ class Environment(ABC):
                     completion_ids,
                     completion_mask,
                     completion_logprobs,
+                    remaining_inputs,
                 ) = self.process_chat_format_vllm(
                     prompt, completion, state, processing_class, mask_env_responses, img
                 )
@@ -785,6 +801,7 @@ class Environment(ABC):
                     completion_ids,
                     completion_mask,
                     completion_logprobs,
+                    remaining_inputs,
                 ) = self.process_completion_format_vllm(
                     prompt, completion, state, processing_class, mask_env_responses
                 )
@@ -812,6 +829,7 @@ class Environment(ABC):
             all_completion_ids.append(completion_ids)
             all_completion_masks.append(completion_mask)
             all_completion_logprobs.append(completion_logprobs)
+            all_remaining_inputs.append(remaining_inputs)
             if zero_truncated_completions and is_truncated:
                 all_rewards.append(0.0)
             else:
@@ -823,7 +841,7 @@ class Environment(ABC):
             completion_mask=all_completion_masks,
             completion_logprobs=all_completion_logprobs,
             rewards=all_rewards,
-            remaining_inputs=[],
+            remaining_inputs=all_remaining_inputs,
         )
 
     # alias for process_env_results_vllm

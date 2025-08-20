@@ -1,6 +1,6 @@
 """Pytest configuration and fixtures for verifiers tests."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from datasets import Dataset
@@ -379,6 +379,9 @@ def mock_processor():
                 )
             )
             self.chat_template = "test_template"
+            # Add image_processor for multimodal support
+            self.image_processor = Mock()
+            self.called = False  # Initialize called flag
 
         def apply_chat_template(self, messages, **kwargs):
             """Apply chat template - processors have this method directly."""
@@ -386,6 +389,7 @@ def mock_processor():
 
         def __call__(self, text=None, images=None, return_tensors=None, **kwargs):
             """Process text and images like a real processor."""
+            self.called = True  # Track that we were called
 
             # Mock tensor class
             class MockTensor:

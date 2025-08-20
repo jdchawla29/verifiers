@@ -10,7 +10,17 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message_param import (
     ChatCompletionMessageParam,
 )
+from openai.types.chat.chat_completion_message_tool_call import (
+    ChatCompletionMessageToolCall,  # noqa: F401
+)
+from openai.types.chat.chat_completion_tool_param import (
+    ChatCompletionToolParam,  # noqa: F401
+)
 from openai.types.completion import Completion
+from openai.types.shared_params import (  # noqa: F401
+    FunctionDefinition,
+    FunctionParameters,
+)
 from pydantic import BaseModel, Field, SkipValidation, ConfigDict
 from PIL import Image
 

@@ -374,11 +374,8 @@ class TestProcessorWrapper:
 class TestMultimodalEnvironment:
     """Test multimodal support in Environment class."""
 
-    @pytest.mark.skip(
-        reason="Uses old process_chat_format method - needs update for vLLM methods"
-    )
-    def test_process_chat_format_with_images(self, mock_processor):
-        """Test processing chat format with images."""
+    def test_process_chat_format_vllm_with_images(self, mock_processor):
+        """Test processing chat format with images using vLLM methods."""
         # Create test environment
         dataset = Dataset.from_dict(
             {
@@ -394,26 +391,50 @@ class TestMultimodalEnvironment:
         images = [Image.new("RGB", (10, 10), color="blue")]
         completion = [{"role": "assistant", "content": "A blue square"}]
 
-        # Process with images
-        prompt_ids, prompt_mask, completion_ids, completion_mask, remaining_inputs = (
-            env.process_chat_format(
-                prompt, images, completion, mock_processor, mask_env_responses=False
-            )
+        # Create mock vLLM response with tokens/logprobs
+        from unittest.mock import Mock
+
+        token_entries = [
+            Mock(logprob=-0.1, token="token_id:1"),
+            Mock(logprob=-0.2, token="token_id:2"),
+        ]
+        mock_choice = Mock()
+        mock_choice.logprobs = Mock()
+        mock_choice.logprobs.content = token_entries
+        mock_chat_completion = Mock()
+        mock_chat_completion.choices = [mock_choice]
+        state = {"responses": [mock_chat_completion]}
+
+        # Process with images using vLLM method
+        (
+            prompt_ids,
+            prompt_mask,
+            completion_ids,
+            completion_mask,
+            completion_logprobs,
+            remaining_inputs,
+        ) = env.process_chat_format_vllm(
+            prompt,
+            completion,
+            state,
+            mock_processor,
+            mask_env_responses=False,
+            images=images,
         )
 
         # Check outputs
         assert isinstance(prompt_ids, list)
         assert isinstance(completion_ids, list)
-        assert remaining_inputs is not None
-        # The processor returns pixel_values, not images
+        assert isinstance(completion_logprobs, list)
+        assert len(completion_logprobs) == len(completion_ids)
+        # With images, the processor should have been called with images
+        assert mock_processor.called
+        # Check remaining_inputs contains pixel_values
+        assert isinstance(remaining_inputs, dict)
         assert "pixel_values" in remaining_inputs
-        assert remaining_inputs["pixel_values"] is not None
 
-    @pytest.mark.skip(
-        reason="Uses old process_env_results method - needs update for vLLM methods"
-    )
-    def test_process_env_results_multimodal(self, mock_processor):
-        """Test processing environment results with multimodal data."""
+    def test_process_env_results_vllm_multimodal(self, mock_processor):
+        """Test processing environment results with multimodal data using vLLM methods."""
         # Create test environment
         dataset = Dataset.from_dict(
             {"prompt": [{"role": "user", "content": "test"}], "answer": ["test"]}
@@ -425,17 +446,39 @@ class TestMultimodalEnvironment:
         prompts = [[{"role": "user", "content": "What is this?"}]]
         images = [[Image.new("RGB", (10, 10), color="green")]]
         completions = [[{"role": "assistant", "content": "A green square"}]]
-        states = [{}]
+
+        # Create mock vLLM response with tokens/logprobs
+        from unittest.mock import Mock
+
+        token_entries = [
+            Mock(logprob=-0.1, token="token_id:1"),
+            Mock(logprob=-0.2, token="token_id:2"),
+            Mock(logprob=-0.3, token="token_id:3"),
+        ]
+        mock_choice = Mock()
+        mock_choice.logprobs = Mock()
+        mock_choice.logprobs.content = token_entries
+        mock_chat_completion = Mock()
+        mock_chat_completion.choices = [mock_choice]
+        states = [{"responses": [mock_chat_completion]}]
         rewards = [1.0]
 
-        # Process results
-        results = env.process_env_results(
-            prompts, images, completions, states, rewards, mock_processor
+        # Process results using vLLM method
+        results = env.process_env_results_vllm(
+            prompts, completions, states, rewards, mock_processor, images=images
         )
 
         # Check outputs
         assert hasattr(results, "prompt_ids")
         assert hasattr(results, "completion_ids")
+        assert hasattr(results, "completion_logprobs")
+        assert hasattr(results, "rewards")
+        assert len(results.prompt_ids) == 1
+        assert len(results.completion_ids) == 1
+        assert len(results.completion_logprobs) == 1
+        assert results.rewards[0] == 1.0
+        # With images, the processor should have been called
+        assert mock_processor.called
         assert hasattr(results, "remaining_inputs")
         assert len(results.remaining_inputs) == 1
         # The processor returns pixel_values, not images

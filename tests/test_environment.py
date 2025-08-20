@@ -240,6 +240,7 @@ class TestEnvironmentBase:
             completion_ids,
             completion_mask,
             completion_logprobs,
+            remaining_inputs,
         ) = env.process_chat_format_vllm(
             prompt, completion, state, mock_tokenizer, mask_env_responses=False
         )
@@ -285,6 +286,7 @@ class TestEnvironmentBase:
             completion_ids,
             completion_mask,
             completion_logprobs,
+            remaining_inputs,
         ) = env.process_completion_format_vllm(
             prompt, completion, state, mock_tokenizer
         )
@@ -296,6 +298,7 @@ class TestEnvironmentBase:
         assert len(prompt_ids) == len(prompt)
         assert len(completion_ids) == len(completion)
         assert all(m == 0 for m in prompt_mask)
+        assert remaining_inputs == {}  # Completion format doesn't support multimodal
         assert all(m == 1 for m in completion_mask)
 
     def test_process_env_results_chat(self, mock_openai_client, sample_dataset):

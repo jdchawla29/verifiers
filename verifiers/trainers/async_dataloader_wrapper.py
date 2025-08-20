@@ -1,7 +1,8 @@
-from typing import Any, List
-from torch.utils.data import DataLoader
-from collections import deque
 import threading
+from collections import deque
+from typing import Any
+
+from torch.utils.data import DataLoader
 
 
 class AsyncDataLoaderWrapper:
@@ -52,7 +53,7 @@ class AsyncDataLoaderWrapper:
             self._current_batch = self._buffer.popleft()
             return self._current_batch
 
-    def peek_ahead(self, n: int = 1) -> List[Any]:
+    def peek_ahead(self, n: int = 1) -> list[Any]:
         """
         Peek at the next n batches without consuming them.
         If n=0, returns the current batch (if available).
@@ -103,7 +104,7 @@ class AsyncDataLoaderWrapper:
                 # Next iterator also exhausted, we're truly done
                 self._exhausted = True
 
-    def get_future_batches(self, start_offset: int, count: int) -> List[Any]:
+    def get_future_batches(self, start_offset: int, count: int) -> list[Any]:
         """
         Get future batches starting from start_offset positions ahead.
         This is used by async generation to get batches for future steps.
@@ -113,7 +114,7 @@ class AsyncDataLoaderWrapper:
             count: Number of batches to return
 
         Returns:
-            List of batches (may be fewer than requested if not available)
+            list of batches (may be fewer than requested if not available)
         """
         with self._lock:
             # Ensure we have enough batches in buffer

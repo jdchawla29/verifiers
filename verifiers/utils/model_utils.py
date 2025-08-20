@@ -1,9 +1,10 @@
 import importlib
 from importlib.util import find_spec
 from importlib import import_module
-from typing import Dict, Any, Union, Tuple, Callable
+from typing import Any, Callable
 
 import torch
+import torch.nn as nn
 from transformers import (
     AutoModelForCausalLM,
     AutoModel,
@@ -15,8 +16,6 @@ from transformers.models.auto.modeling_auto import (
     AutoModelForSeq2SeqLM,
     AutoModelForVision2Seq,
 )
-
-import torch.nn as nn
 
 
 class _ForwardRedirection:
@@ -117,7 +116,7 @@ def get_model(
     model_name: str,
     use_liger: bool = True,
     liger_patch_suffix: str | None = None,
-    model_kwargs: Union[Dict[str, Any], None] = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> Any:
     if model_kwargs is None:
         model_kwargs = dict(
@@ -177,8 +176,8 @@ def get_model_and_tokenizer(
     model_name: str,
     use_liger: bool = True,
     liger_patch_suffix: str | None = None,
-    model_kwargs: Union[Dict[str, Any], None] = None,
-) -> Tuple[Any, Any]:
+    model_kwargs: dict[str, Any] | None = None,
+) -> tuple[Any, Any]:
     model = get_model(model_name, use_liger, liger_patch_suffix, model_kwargs)
     tokenizer = get_tokenizer(model_name)
     return model, tokenizer

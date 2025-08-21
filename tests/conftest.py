@@ -339,15 +339,52 @@ def mock_multiturn_env_max_turns(mock_openai_client, sample_chat_dataset):
     )
 
 
-# Multimodal test fixtures
+@pytest.fixture
+def mock_tokenizer():
+    """Return a mock tokenizer for testing."""
+
+    class MockTokenizer:
+        """Mock tokenizer that mimics transformers tokenizer behavior."""
+
+        def __init__(self, **kwargs):
+            # Initialize with minimal required attributes
+            self._pad_token = kwargs.get("pad_token", None)
+            self._pad_token_id = kwargs.get("pad_token_id", None)
+            self.eos_token = kwargs.get("eos_token", "</s>")
+            self.eos_token_id = kwargs.get("eos_token_id", 2)
+            self.vocab_size = kwargs.get("vocab_size", 32000)
+            self.model_max_length = kwargs.get("model_max_length", 2048)
+            # special_tokens_map is a property, can't set directly
+
+            # Add mock methods
+            self.apply_chat_template = MagicMock(return_value=[1, 2, 3])
+            self.encode = MagicMock(return_value=[4, 5, 6])
+            self.decode = MagicMock(return_value="decoded text")
+            self.batch_decode = MagicMock(return_value=["decoded_0", "decoded_1"])
+
+        @property
+        def pad_token(self):
+            return self._pad_token
+
+        @pad_token.setter
+        def pad_token(self, value):
+            self._pad_token = value
+            # When pad_token is set to eos_token, also update pad_token_id
+            if value == self.eos_token:
+                self._pad_token_id = self.eos_token_id
+
+        @property
+        def pad_token_id(self):
+            return self._pad_token_id
+
+    return MockTokenizer()
 
 
 @pytest.fixture
 def mock_processor():
     """Return a mock multimodal processor for testing."""
-    from transformers import ProcessorMixin
 
-    class MockProcessor(ProcessorMixin):
+    class MockProcessor:
         """Mock processor that mimics AutoProcessor behavior."""
 
         def __init__(self):
@@ -424,45 +461,3 @@ def mock_processor():
             return [f"decoded_{i}" for i in range(len(token_ids))]
 
     return MockProcessor()
-
-
-@pytest.fixture
-def mock_tokenizer():
-    """Return a mock tokenizer for testing."""
-    from transformers import PreTrainedTokenizerBase
-
-    class MockTokenizer(PreTrainedTokenizerBase):
-        """Mock tokenizer that inherits from PreTrainedTokenizerBase."""
-
-        def __init__(self, **kwargs):
-            # Initialize with minimal required attributes
-            self._pad_token = kwargs.get("pad_token", None)
-            self._pad_token_id = kwargs.get("pad_token_id", None)
-            self.eos_token = kwargs.get("eos_token", "</s>")
-            self.eos_token_id = kwargs.get("eos_token_id", 2)
-            self.vocab_size = kwargs.get("vocab_size", 32000)
-            self.model_max_length = kwargs.get("model_max_length", 2048)
-            # special_tokens_map is a property, can't set directly
-
-            # Add mock methods
-            self.apply_chat_template = MagicMock(return_value=[1, 2, 3])
-            self.encode = MagicMock(return_value=[4, 5, 6])
-            self.decode = MagicMock(return_value="decoded text")
-            self.batch_decode = MagicMock(return_value=["decoded_0", "decoded_1"])
-
-        @property
-        def pad_token(self):
-            return self._pad_token
-
-        @pad_token.setter
-        def pad_token(self, value):
-            self._pad_token = value
-            # When pad_token is set to eos_token, also update pad_token_id
-            if value == self.eos_token:
-                self._pad_token_id = self.eos_token_id
-
-        @property
-        def pad_token_id(self):
-            return self._pad_token_id
-
-    return MockTokenizer()

@@ -282,35 +282,18 @@ class AsyncBatchGenerator:
             all_reward_dict[k] = env_results.metrics[k]
 
         # Process results
-        # Check if we should use vLLM processing
-        if hasattr(self.env, "process_env_results_vllm") and all(
-            "responses" in state for state in env_results.state if state
-        ):
-            processed_results = self.env.process_env_results_vllm(
-                prompts=env_results.prompt,
-                completions=env_results.completion,
-                states=env_results.state,
-                rewards=env_results.reward,
-                processing_class=request.processing_class,
-                max_seq_len=request.max_seq_len,
-                mask_env_responses=request.mask_env_responses,
-                mask_truncated_completions=request.mask_truncated_completions,
-                zero_truncated_completions=request.zero_truncated_completions,
-                images=env_results.images,
-            )
-        else:
-            processed_results = self.env.process_env_results(
-                prompts=env_results.prompt,
-                images=env_results.images,  # May be None for text-only tasks
-                completions=env_results.completion,
-                states=env_results.state,
-                rewards=env_results.reward,
-                processing_class=request.processing_class,
-                max_seq_len=request.max_seq_len,
-                mask_env_responses=request.mask_env_responses,
-                mask_truncated_completions=request.mask_truncated_completions,
-                zero_truncated_completions=request.zero_truncated_completions,
-            )
+        processed_results = self.env.process_env_results_vllm(
+            prompts=env_results.prompt,
+            completions=env_results.completion,
+            states=env_results.state,
+            rewards=env_results.reward,
+            processing_class=request.processing_class,
+            max_seq_len=request.max_seq_len,
+            mask_env_responses=request.mask_env_responses,
+            mask_truncated_completions=request.mask_truncated_completions,
+            zero_truncated_completions=request.zero_truncated_completions,
+            images=env_results.images,
+        )
 
         return BatchResult(
             batch_id=request.batch_id,

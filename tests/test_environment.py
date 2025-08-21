@@ -1,10 +1,9 @@
 """Tests for the base Environment class."""
 
-from unittest.mock import AsyncMock, Mock, create_autospec
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from datasets import Dataset
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from verifiers import Environment, Parser, Rubric
 from verifiers.types import GenerateOutputs, RolloutScores
@@ -301,7 +300,9 @@ class TestEnvironmentBase:
         assert remaining_inputs == {}  # Completion format doesn't support multimodal
         assert all(m == 1 for m in completion_mask)
 
-    def test_process_env_results_chat(self, mock_openai_client, sample_dataset):
+    def test_process_env_results_chat(
+        self, mock_openai_client, sample_dataset, mock_tokenizer
+    ):
         """Test processing environment results for chat format."""
         env = SimpleEnvironment(
             client=mock_openai_client,
@@ -311,10 +312,7 @@ class TestEnvironmentBase:
             rubric=Rubric(),
         )
 
-        # Create a mock tokenizer that passes isinstance check
-        mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
-
-        # Track the conversation state
+        # Configure the mock tokenizer for this test
         def mock_apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=True
         ):
@@ -324,8 +322,8 @@ class TestEnvironmentBase:
         def mock_encode(text, **kwargs):
             return list(range(3))
 
-        mock_tokenizer.apply_chat_template = Mock(side_effect=mock_apply_chat_template)
-        mock_tokenizer.encode = Mock(side_effect=mock_encode)
+        mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
+        mock_tokenizer.encode.side_effect = mock_encode
 
         prompts = [[{"role": "user", "content": "Hello"}]]
         completions = [[{"role": "assistant", "content": "Hi there!"}]]
@@ -358,7 +356,7 @@ class TestEnvironmentBase:
         assert results.rewards[0] == 1.0
 
     def test_process_env_results_with_truncation(
-        self, mock_openai_client, sample_dataset
+        self, mock_openai_client, sample_dataset, mock_tokenizer
     ):
         """Test processing environment results with sequence length truncation."""
         env = SimpleEnvironment(
@@ -369,10 +367,7 @@ class TestEnvironmentBase:
             rubric=Rubric(),
         )
 
-        # Create a mock tokenizer that passes isinstance check
-        mock_tokenizer = create_autospec(PreTrainedTokenizerBase, instance=True)
-
-        # Track the conversation state
+        # Configure the mock tokenizer for this test
         def mock_apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=True
         ):
@@ -384,8 +379,8 @@ class TestEnvironmentBase:
             # Not used by chat path; keep for compatibility
             return list(range(3))
 
-        mock_tokenizer.apply_chat_template = Mock(side_effect=mock_apply_chat_template)
-        mock_tokenizer.encode = Mock(side_effect=mock_encode)
+        mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
+        mock_tokenizer.encode.side_effect = mock_encode
 
         prompts = [[{"role": "user", "content": "Hello"}]]
         completions = [[{"role": "assistant", "content": "Hi there!"}]]

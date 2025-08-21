@@ -150,7 +150,7 @@ def main():
     parser.add_argument(
         "env",
         type=str,
-        help="The environment id to init",
+        help=("The environment id to init"),
     )
     parser.add_argument(
         "--path",

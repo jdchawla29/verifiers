@@ -76,7 +76,6 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
         rollouts_per_example=rollouts_per_example,
         max_concurrent_requests=max_concurrent_requests,
     )
-
     print("--- Evaluation ---")
     print(f"Environment: {env}")
     print(f"Model: {model}")
@@ -85,13 +84,9 @@ Please specify the model name (-m), API host base URL (-b), and API key variable
     print(f"Rollouts per example: {rollouts_per_example}")
 
     print("--- Example ---")
-    try:
-        vf.print_prompt_completions_sample(
-            results.prompt, results.completion, results.reward, step=0
-        )
-    except AttributeError:
-        # Skip if rich is not installed
-        pass
+    vf.print_prompt_completions_sample(
+        results.prompt, results.completion, results.reward, step=0
+    )
     print("--- All ---")
     print("Rewards:")
     print(

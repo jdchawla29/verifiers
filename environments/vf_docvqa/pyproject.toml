@@ -3,7 +3,6 @@ name = "vf-docvqa"
 version = "0.1.0"
 dependencies = [
     "verifiers>=0.1.2",
-    "Pillow",
 ]
 
 [build-system]

@@ -452,9 +452,7 @@ class GRPOTrainer(Trainer):
         super().__init__(
             model=model,
             args=args,
-            data_collator=env.data_collator
-            if env.data_collator is not None
-            else default_data_collator,
+            data_collator=default_data_collator,
             train_dataset=train_dataset,
             eval_dataset=datasets.Dataset.from_dict(
                 {}
@@ -1440,7 +1438,7 @@ class GRPOTrainer(Trainer):
                         for item in content:
                             if isinstance(item, dict) and item.get("type") == "text":
                                 text_content += item.get("text", "")
-                            elif isinstance(item, dict) and item.get("type") == "image":
+                            elif isinstance(item, dict) and item.get("type") == "image_url":
                                 text_content += " [IMAGE]"
                         text_parts.append(f"{role}: {text_content}")
                     elif isinstance(content, str):

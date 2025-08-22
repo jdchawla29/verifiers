@@ -1,5 +1,5 @@
 """
-GRPO training script for DocVQA environment.
+GRPO training script for MMMU environment.
 
 For local multimodal model training:
     # Run training (requires 2 GPUs)
@@ -7,7 +7,7 @@ For local multimodal model training:
     CUDA_VISIBLE_DEVICES=0 vf-vllm --model 'Qwen/Qwen2.5-VL-3B-Instruct' --max-model-len 16384
 
     # GPU 1: Training
-    CUDA_VISIBLE_DEVICES=1 python examples/grpo/train_docvqa.py
+    CUDA_VISIBLE_DEVICES=1 python examples/grpo/train_mmmu.py
 """
 
 import argparse
@@ -16,8 +16,8 @@ import sys
 import verifiers as vf
 
 # Import the environment
-sys.path.append("environments/vf_docvqa")
-from vf_docvqa import load_environment
+sys.path.append("environments/vf_mmmu")
+from vf_mmmu import load_environment
 
 # Set up logging
 logging.basicConfig(
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Train multimodal models on DocVQA")
+    parser = argparse.ArgumentParser(description="Train multimodal models on MMMU")
     parser.add_argument(
         "--model",
         type=str,
@@ -36,10 +36,10 @@ def main():
         help="Model to train (must match the vLLM server model)",
     )
     parser.add_argument(
-        "--train-samples", type=int, default=1000, help="Number of training samples"
+        "--train-samples", type=int, default=-1, help="Number of training samples (-1 for all)"
     )
     parser.add_argument(
-        "--eval-samples", type=int, default=100, help="Number of evaluation samples"
+        "--eval-samples", type=int, default=-1, help="Number of evaluation samples (-1 for all)"
     )
     args = parser.parse_args()
 
@@ -52,7 +52,7 @@ def main():
     MAX_STEPS = 200
     EVAL_STEPS = 20
     BATCH_SIZE = 4
-    GRADIENT_ACCUMULATION_STEPS = 4
+    GRADIENT_ACCUMULATION_STEPS = 8
     NUM_GENERATIONS = 8
 
     vf_env = load_environment(
@@ -63,7 +63,7 @@ def main():
     model, processor = vf.get_model_and_tokenizer(MODEL_NAME)
 
     # Training arguments
-    run_name = f"docvqa_{MODEL_NAME.split('/')[-1].lower()}"
+    run_name = f"mmmu_{MODEL_NAME.split('/')[-1].lower()}"
     training_args = vf.grpo_defaults(run_name=run_name)
 
     # Customize training arguments
@@ -97,7 +97,7 @@ def main():
         args=training_args,
     )
 
-    logger.info(f"Starting GRPO training for {MODEL_NAME} on DocVQA")
+    logger.info(f"Starting GRPO training for {MODEL_NAME} on MMMU")
     logger.info(f"Train samples: {TRAIN_SAMPLES}, Eval samples: {EVAL_SAMPLES}")
     logger.info(
         f"Batch size: {BATCH_SIZE}, Gradient accumulation: {GRADIENT_ACCUMULATION_STEPS}"

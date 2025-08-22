@@ -49,7 +49,7 @@ Respond in the following format:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": msg["content"]},
-                            {"type": "image"},  # Add image placeholder
+                            {"type": "image_url", "image_url": {"url": "placeholder://image"}},
                         ],
                     }
                     new_messages.append(new_msg)

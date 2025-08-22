@@ -49,7 +49,9 @@ def format_openai_messages(
             if isinstance(content, list):
                 new_parts = []
                 for part in content:
-                    if part.get("type") == "image":
+                    # Check for placeholder URL pattern
+                    if (part.get("type") == "image_url" and 
+                        part.get("image_url", {}).get("url", "").startswith("placeholder://")):
                         img = next(img_iter)
                         data_url = pil_to_data_url(img)
                         new_parts.append(
@@ -79,9 +81,15 @@ def extract_text_from_multimodal_content(content: Any) -> str:
         return content
 
     if isinstance(content, list):
+        text_parts = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                return item.get("text", "")
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    text_parts.append("[IMAGE]")
+        
+        return " ".join(text_parts) if text_parts else ""
 
     return ""
 

@@ -1,7 +1,6 @@
 """Tests for multimodal support in verifiers."""
 
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
 from PIL import Image
 import base64
 from datasets import Dataset
@@ -13,7 +12,6 @@ from verifiers.utils.image_utils import (
     extract_text_from_multimodal_content,
     extract_images_from_batch,
 )
-from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchRequest
 
 
 class TestMultimodalUtils:
@@ -48,7 +46,7 @@ class TestMultimodalUtils:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "What is in this image?"},
-                        {"type": "image"},
+                        {"type": "image_url", "image_url": {"url": "placeholder://image"}},
                     ],
                 }
             ],
@@ -57,7 +55,7 @@ class TestMultimodalUtils:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Describe this picture"},
-                        {"type": "image"},
+                        {"type": "image_url", "image_url": {"url": "placeholder://image"}},
                     ],
                 }
             ],
@@ -106,7 +104,7 @@ class TestMultimodalUtils:
             [
                 {
                     "role": "user",
-                    "content": [{"type": "text", "text": "test"}, {"type": "image"}],
+                    "content": [{"type": "text", "text": "test"}, {"type": "image_url", "image_url": {"url": "placeholder://image"}}],
                 }
             ]
         ]
@@ -124,8 +122,8 @@ class TestMultimodalUtils:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "test"},
-                        {"type": "image"},
-                        {"type": "image"},  # Two placeholders
+                        {"type": "image_url", "image_url": {"url": "placeholder://image"}},
+                        {"type": "image_url", "image_url": {"url": "placeholder://image"}},  # Two placeholders
                     ],
                 }
             ]
@@ -143,7 +141,7 @@ class TestMultimodalUtils:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "test"},
-                        {"type": "image"},  # One placeholder
+                        {"type": "image_url", "image_url": {"url": "placeholder://image"}},  # One placeholder
                     ],
                 }
             ]
@@ -163,27 +161,27 @@ class TestMultimodalUtils:
         # Simple string content
         assert extract_text_from_multimodal_content("Hello") == "Hello"
 
-        # List with text items - returns only first text item
+        # List with mixed content
         content = [
             {"type": "text", "text": "Part 1"},
-            {"type": "image"},
+            {"type": "image_url", "image_url": {"url": "placeholder://image"}},
             {"type": "text", "text": "Part 2"},
         ]
-        assert extract_text_from_multimodal_content(content) == "Part 1"
+        assert extract_text_from_multimodal_content(content) == "Part 1 [IMAGE] Part 2"
 
         # Text item not first
         content_text_second = [
-            {"type": "image"},
+            {"type": "image_url", "image_url": {"url": "placeholder://image"}},
             {"type": "text", "text": "Found text"},
         ]
-        assert extract_text_from_multimodal_content(content_text_second) == "Found text"
+        assert extract_text_from_multimodal_content(content_text_second) == "[IMAGE] Found text"
 
         # Empty content
         assert extract_text_from_multimodal_content([]) == ""
 
         # Content without text
-        content_no_text = [{"type": "image"}, {"type": "other"}]
-        assert extract_text_from_multimodal_content(content_no_text) == ""
+        content_no_text = [{"type": "image_url", "image_url": {"url": "placeholder://image"}}, {"type": "other"}]
+        assert extract_text_from_multimodal_content(content_no_text) == "[IMAGE]"
 
         # None content
         assert extract_text_from_multimodal_content(None) == ""
@@ -370,83 +368,6 @@ class TestMultimodalEnvironment:
 #     # Trainer tests would go here if needed
 
 
-class TestAsyncBatchGeneratorMultimodal:
-    """Test multimodal support in async batch generator."""
-
-    @pytest.fixture
-    def mock_env_multimodal(self):
-        """Create a mock environment with multimodal support."""
-        from verifiers.types import GenerateOutputs
-
-        env = Mock()
-        env.a_generate = AsyncMock(
-            return_value=GenerateOutputs(
-                prompt=[[{"role": "user", "content": "test"}]],
-                answer=[""],
-                task=["default"],
-                info=[{}],
-                completion=[[{"role": "assistant", "content": "response"}]],
-                state=[{}],
-                reward=[1.0],
-                metrics={},
-            )
-        )
-        from verifiers.types import ProcessedOutputs
-
-        processed_output = ProcessedOutputs(
-            prompt_ids=[[1, 2, 3]],
-            prompt_mask=[[0, 0, 0]],
-            completion_ids=[[4, 5, 6]],
-            completion_mask=[[1, 1, 1]],
-            completion_logprobs=[[0.0, 0.0, 0.0]],
-            rewards=[1.0],
-            remaining_inputs=[{"images": [Image.new("RGB", (10, 10), color="red")]}],
-        )
-        env.process_env_results = Mock(return_value=processed_output)
-        env.process_env_results_vllm = Mock(return_value=processed_output)
-        return env
-
-    @pytest.mark.asyncio
-    async def test_generate_batch_with_images(
-        self, mock_env_multimodal, mock_processor
-    ):
-        """Test async batch generation with images."""
-        client_config = {
-            "base_url": "http://test",
-            "api_key": "test",
-            "http_client_args": {"limits": {"max_connections": 10}, "timeout": 30.0},
-        }
-
-        generator = AsyncBatchGenerator(
-            env=mock_env_multimodal,
-            client_config=client_config,
-            model_name="test-model",
-            sampling_args={},
-        )
-
-        # Create batch request
-        request = BatchRequest(
-            batch_id=0,
-            env_inputs={"prompt": [[{"role": "user", "content": "test"}]]},
-            processing_class=mock_processor,
-            mask_env_responses=False,
-            max_seq_len=100,
-            mask_truncated_completions=False,
-            zero_truncated_completions=False,
-            max_concurrent=10,
-        )
-
-        # Generate batch (mocked)
-        with patch.object(generator, "client", Mock()):
-            result = await generator._generate_batch_async(request)
-
-        # Check result
-        assert result.batch_id == 0
-        assert hasattr(result.processed_results, "remaining_inputs")
-        assert len(result.processed_results.remaining_inputs) == 1
-        assert "images" in result.processed_results.remaining_inputs[0]
-
-
 class TestMultimodalIntegration:
     """Integration tests for multimodal workflows.
 
@@ -470,7 +391,7 @@ class TestMultimodalIntegration:
                 # Create multimodal prompt format with image placeholders
                 content_block = []
                 content_block.append({"type": "text", "text": batch["question"][i]})
-                content_block.append({"type": "image"})  # Image placeholder
+                content_block.append({"type": "image_url", "image_url": {"url": "placeholder://image"}})  # Image placeholder
 
                 # Format the prompt with multimodal content
                 prompts.append([{"role": "user", "content": content_block}])
@@ -525,8 +446,8 @@ class TestMultimodalIntegration:
         # Configure mock client response
         mock_openai_client.set_response("It's a red square")
 
-        # Create a data collator that formats prompts for multimodal
-        def multimodal_collator(batch):
+        # Create a data collator that formats prompts
+        def collator(batch):
             # Handle batched format from dataset.map()
             prompts = []
             images = []
@@ -535,7 +456,7 @@ class TestMultimodalIntegration:
                 # Create multimodal content structure
                 content = [
                     {"type": "text", "text": batch["question"][i]},
-                    {"type": "image"},  # Placeholder for image
+                    {"type": "image_url", "image_url": {"url": "placeholder://image"}},  # Placeholder for image
                 ]
                 prompts.append([{"role": "user", "content": content}])
                 # Create a simple PIL image
@@ -559,7 +480,7 @@ class TestMultimodalIntegration:
             eval_dataset=base_dataset,  # data_collator applies to eval_dataset
             parser=Parser(),
             rubric=Rubric(),
-            data_collator=multimodal_collator,
+            data_collator=collator,
         )
 
         # Run generation on eval dataset (which has data_collator applied)

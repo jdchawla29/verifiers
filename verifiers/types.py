@@ -8,11 +8,12 @@ from typing import (
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message_param import (
-    ChatCompletionMessageParam,
+    ChatCompletionMessageParam as ChatMessage,
 )
 from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,  # noqa: F401
 )
+from openai.types.chat.chat_completion_role import ChatCompletionRole  # noqa: F401
 from openai.types.chat.chat_completion_tool_param import (
     ChatCompletionToolParam,  # noqa: F401
 )
@@ -30,7 +31,7 @@ ModelResponse = Completion | ChatCompletion | None
 
 # Use the OpenAI type with SkipValidation to avoid pydantic ValidatorIterator issues
 # This maintains type safety while allowing multimodal messages to work properly
-ChatMessage = Annotated[ChatCompletionMessageParam, SkipValidation]
+ChatMessage = Annotated[ChatMessage, SkipValidation]
 Message = str | ChatMessage
 Messages = str | list[ChatMessage]
 Info = dict[str, Any]

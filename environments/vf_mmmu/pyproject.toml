@@ -1,0 +1,14 @@
+[project]
+name = "vf-mmmu"
+version = "0.1.0"
+description = "MMMU verifiers environment"
+requires-python = ">=3.10"
+dependencies = [
+    "verifiers",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]

@@ -9,12 +9,10 @@ from typing import Any, Dict, List, Optional, Sized, Tuple, Union, Sequence
 import datasets
 import numpy as np
 import torch
-import transformers
 import wandb
 from accelerate.utils import broadcast_object_list, gather_object, is_peft_model
 from peft import PeftConfig, get_peft_model
 from torch.utils.data import DataLoader, Sampler
-from transformers import AutoConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -134,7 +132,12 @@ class RepeatSampler(Sampler):
                         yield index
 
     def __len__(self) -> int:
-        return self.num_samples * self.mini_repeat_count * self.repeat_count
+        return (
+            (self.num_samples // self.batch_size)
+            * self.batch_size
+            * self.mini_repeat_count
+            * self.repeat_count
+        )
 
 
 # torch.nanstd doesn't exist, so we define it here
@@ -188,7 +191,9 @@ def split_tensor_dict(
     ]
 
 
-def shuffle_sequence_dict(seq_dict: dict[str, Optional[Sequence]]) -> dict[str, Optional[Sequence]]:
+def shuffle_sequence_dict(
+    seq_dict: dict[str, Optional[Sequence]],
+) -> dict[str, Optional[Sequence]]:
     """
     Shuffles all sequence-like values in a dictionary along the first dimension in unison.
 
@@ -290,7 +295,9 @@ class GRPOTrainer(Trainer):
         elif isinstance(processing_class, PreTrainedTokenizerBase):
             tokenizer = processing_class
         else:
-            raise TypeError("The `processing_class` must be either a `PreTrainedTokenizerBase` or a `ProcessorMixin`")
+            raise TypeError(
+                "The `processing_class` must be either a `PreTrainedTokenizerBase` or a `ProcessorMixin`"
+            )
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -300,7 +307,9 @@ class GRPOTrainer(Trainer):
         self.eos_token_id = tokenizer.eos_token_id
         self.image_token = getattr(processing_class, "image_token", None)
         self.image_token_id = getattr(processing_class, "image_token_id", None)
-        self.vision_start_token_id = getattr(model.config, "vision_start_token_id", None)
+        self.vision_start_token_id = getattr(
+            model.config, "vision_start_token_id", None
+        )
         self.vision_end_token_id = getattr(model.config, "vision_end_token_id", None)
 
         # Training arguments
@@ -418,7 +427,7 @@ class GRPOTrainer(Trainer):
             )
             max_length = self.max_prompt_length  # Capture for closure
 
-            def filter_by_prompt_length(example):
+            def filter_by_prompt_length(example, processing_class):
                 prompt = example["prompt"]
                 # Tokenize prompt to check length
                 if isinstance(prompt, list):
@@ -444,7 +453,9 @@ class GRPOTrainer(Trainer):
 
             original_size = len(train_dataset)
             train_dataset = train_dataset.filter(
-                filter_by_prompt_length, num_proc=self.max_data_workers
+                filter_by_prompt_length,
+                num_proc=self.max_data_workers,
+                fn_kwargs={"processing_class": processing_class},
             )
             filtered_size = len(train_dataset)
             if filtered_size < original_size:
@@ -750,15 +761,13 @@ class GRPOTrainer(Trainer):
         # For LLaVa-Next
         if "image_sizes" in model_kwargs:
             model_inputs["image_sizes"] = model_kwargs["image_sizes"]
-  
+
         # Only add logits_to_keep if the model supports it
         if self.model_accepts_logits_to_keep:
             # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
             model_inputs["logits_to_keep"] = logits_to_keep + 1
 
-        last_hidden_state = unwrapped_model.model(
-            **model_inputs
-        ).last_hidden_state
+        last_hidden_state = unwrapped_model.model(**model_inputs).last_hidden_state
         last_hidden_state = last_hidden_state[:, :-1, :]  # (B, L-1, H)
         # Only keep the last logits_to_keep. For model that support logits_to_keep, this is a no-op.
         last_hidden_state = last_hidden_state[
@@ -792,22 +801,39 @@ class GRPOTrainer(Trainer):
 
             # image_grid_thw, pixel_values, pixel_attention_mask, image_sizes...
             if "image_grid_thw" in model_kwargs and "pixel_values" in model_kwargs:
-                model_inputs["image_grid_thw"] = model_kwargs["image_grid_thw"][i : i + batch_size]
-                start_pixel_idx = model_kwargs["image_grid_thw"][:i].prod(-1).sum().item()
-                end_pixel_idx = model_kwargs["image_grid_thw"][: i + batch_size].prod(-1).sum().item()
-                model_inputs["pixel_values"] = model_kwargs["pixel_values"][start_pixel_idx:end_pixel_idx]
+                model_inputs["image_grid_thw"] = model_kwargs["image_grid_thw"][
+                    i : i + batch_size
+                ]
+                start_pixel_idx = (
+                    model_kwargs["image_grid_thw"][:i].prod(-1).sum().item()
+                )
+                end_pixel_idx = (
+                    model_kwargs["image_grid_thw"][: i + batch_size]
+                    .prod(-1)
+                    .sum()
+                    .item()
+                )
+                model_inputs["pixel_values"] = model_kwargs["pixel_values"][
+                    start_pixel_idx:end_pixel_idx
+                ]
             elif "pixel_values" in model_kwargs:
-                model_inputs["pixel_values"] = model_kwargs["pixel_values"][i : i + batch_size]
+                model_inputs["pixel_values"] = model_kwargs["pixel_values"][
+                    i : i + batch_size
+                ]
             if "pixel_attention_mask" in model_kwargs:
-                model_inputs["pixel_attention_mask"] = model_kwargs["pixel_attention_mask"][i : i + batch_size]
+                model_inputs["pixel_attention_mask"] = model_kwargs[
+                    "pixel_attention_mask"
+                ][i : i + batch_size]
             if "image_sizes" in model_kwargs:
-                model_inputs["image_sizes"] = model_kwargs["image_sizes"][i : i + batch_size]
+                model_inputs["image_sizes"] = model_kwargs["image_sizes"][
+                    i : i + batch_size
+                ]
 
             # Only add logits_to_keep if the model supports it
             if self.model_accepts_logits_to_keep:
                 # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
                 model_inputs["logits_to_keep"] = logits_to_keep + 1
-            
+
             logits = model(**model_inputs).logits
             logits = logits[
                 :, :-1, :
@@ -1001,7 +1027,11 @@ class GRPOTrainer(Trainer):
 
         # Gather batch data from all processes
         prompts = [x["prompt"] for x in batch]
-        images = [x.get("images", []) for x in batch] if any("images" in x for x in batch) else None
+        images = (
+            [x.get("images", []) for x in batch]
+            if any("images" in x for x in batch)
+            else None
+        )
         answers = [x["answer"] for x in batch]
         tasks = [x.get("task", "default") for x in batch]
         infos = [x.get("info", {}) for x in batch]

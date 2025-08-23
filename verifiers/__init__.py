@@ -54,8 +54,9 @@ try:
     )
     from .utils.model_utils import (  # noqa: F401
         get_model,
+        get_model_and_processor,
         get_model_and_tokenizer,
-        get_tokenizer,
+        get_processor,
     )
 
     _HAS_TRL = True
@@ -122,7 +123,8 @@ if _HAS_TRL:
     __all__.extend(
         [
             "get_model",
-            "get_tokenizer",
+            "get_processor",
+            "get_model_and_processor",
             "get_model_and_tokenizer",
             "GRPOTrainer",
             "GRPOConfig",

@@ -92,31 +92,3 @@ def extract_text_from_multimodal_content(content: Any) -> str:
         return " ".join(text_parts) if text_parts else ""
 
     return ""
-
-
-def has_images(batch: list[dict[str, Any]]) -> bool:
-    """Check if a batch contains images.
-
-    Args:
-        batch: List of batch items
-
-    Returns:
-        True if any item has images
-    """
-    return any("images" in item for item in batch)
-
-
-def extract_images_from_batch(
-    batch: list[dict[str, Any]],
-) -> list[list[Image.Image]] | None:
-    """Extract images from a batch if present.
-
-    Args:
-        batch: List of batch items
-
-    Returns:
-        List of image lists or None if no images
-    """
-    if not has_images(batch):
-        return None
-    return [item.get("images", []) for item in batch]

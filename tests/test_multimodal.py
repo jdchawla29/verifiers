@@ -186,40 +186,6 @@ class TestMultimodalUtils:
         # None content
         assert extract_text_from_multimodal_content(None) == ""
 
-    def test_extract_images_from_batch(self):
-        """Test image extraction from batches."""
-        img1 = Image.new("RGB", (10, 10), color="red")
-        img2 = Image.new("RGB", (10, 10), color="blue")
-
-        # Normal batch with images - batch is a list of items
-        batch = [
-            {"images": [img1], "prompt": "test1"},
-            {"images": [img2], "prompt": "test2"},
-        ]
-        images = extract_images_from_batch(batch)
-        assert images == [[img1], [img2]]
-
-        # Batch without images key
-        batch_no_images = [
-            {"prompt": "test", "answer": "test"},
-            {"prompt": "test2", "answer": "test2"},
-        ]
-        images = extract_images_from_batch(batch_no_images)
-        assert images is None
-
-        # Mixed batch - some with images, some without
-        batch_mixed = [
-            {"images": [img1], "prompt": "test1"},
-            {"prompt": "test2", "answer": "test2"},
-        ]
-        images = extract_images_from_batch(batch_mixed)
-        assert images == [[img1], []]
-
-        # Empty batch
-        batch_empty = []
-        images = extract_images_from_batch(batch_empty)
-        assert images is None
-
     def test_pil_to_data_url_edge_cases(self):
         """Test PIL to data URL conversion edge cases."""
         # Test with different image modes

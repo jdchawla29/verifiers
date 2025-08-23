@@ -1,19 +1,20 @@
 # adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py
 
-import inspect
 import logging
 import time
 from collections import defaultdict, deque
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Sized, Tuple, Union
+from typing import Any, Dict, List, Optional, Sized, Tuple, Union, Sequence
 
 import datasets
 import numpy as np
 import torch
+import transformers
 import wandb
 from accelerate.utils import broadcast_object_list, gather_object, is_peft_model
 from peft import PeftConfig, get_peft_model
 from torch.utils.data import DataLoader, Sampler
+from transformers import AutoConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -30,11 +31,8 @@ from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchR
 from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
 from verifiers.utils.logging_utils import print_prompt_completions_sample
-from verifiers.utils.model_utils import generic_model_loader
-from verifiers.utils.image_utils import (
-    extract_images_from_batch,
-    extract_text_from_multimodal_content,
-)
+from verifiers.utils.model_utils import model_loader, accepts_logits_to_keep
+from verifiers.utils.image_utils import extract_text_from_multimodal_content
 
 
 class RepeatSampler(Sampler):
@@ -139,19 +137,6 @@ class RepeatSampler(Sampler):
         return self.num_samples * self.mini_repeat_count * self.repeat_count
 
 
-def _accepts_logits_to_keep(model) -> bool:
-    forward = (
-        model.get_base_model().forward
-        if hasattr(model, "get_base_model")
-        else model.forward
-    )
-    try:
-        inspect.signature(forward).bind_partial(**{"logits_to_keep": None})
-        return True
-    except TypeError:
-        return False
-
-
 # torch.nanstd doesn't exist, so we define it here
 def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -173,52 +158,64 @@ def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(variance)
 
 
-def shuffle_data_dict(data_dict: dict[str, Any]) -> dict[str, Any]:
+def split_tensor_dict(
+    tensor_dict: dict[str, Optional[torch.Tensor]], num_chunks: int
+) -> list[dict[str, Optional[torch.Tensor]]]:
     """
-    Shuffles a dictionary of tensors or lists along the first dimension in unison.
+    Splits a dictionary of tensors along the first dimension into `num_chunks` equal parts.
+
+    Example:
+        >>> x = torch.arange(12).reshape(6, 2)
+        >>> y = torch.arange(6).reshape(6, 1)
+        >>> tensor_dict = {"x": x, "y": y}
+        >>> split_tensor_dict(tensor_dict, 3)
+        [
+            {"x": tensor([[0, 1], [2, 3]]), "y": tensor([[0], [1]])},
+            {"x": tensor([[4, 5], [6, 7]]), "y": tensor([[2], [3]])},
+            {"x": tensor([[ 8,  9], [10, 11]]), "y": tensor([[4], [5]])}
+        ]
     """
-    first_item = next(item for item in data_dict.values() if item is not None)
-    batch_size = len(first_item)
+    first_tensor = next(tensor for tensor in tensor_dict.values() if tensor is not None)
+    chunk_size = first_tensor.shape[0] // num_chunks
+    return [
+        {
+            key: tensor[i * chunk_size : (i + 1) * chunk_size]
+            if tensor is not None
+            else None
+            for key, tensor in tensor_dict.items()
+        }
+        for i in range(num_chunks)
+    ]
+
+
+def shuffle_sequence_dict(seq_dict: dict[str, Optional[Sequence]]) -> dict[str, Optional[Sequence]]:
+    """
+    Shuffles all sequence-like values in a dictionary along the first dimension in unison.
+
+    Example:
+    ```python
+    >>> x = torch.arange(6).reshape(3, 2)
+    >>> y = ["a", "b", "c"]
+    >>> seq_dict = {"x": x, "y": y}
+    >>> shuffle_sequence_dict(seq_dict)
+    {'x': tensor([[2, 3],
+                  [0, 1],
+                  [4, 5]]),
+     'y': ['b', 'a', 'c']}
+    ```
+    """
+    # Determine batch size from the first non-None sequence
+    batch_size = len(next(v for v in seq_dict.values() if v is not None))
     permutation = torch.randperm(batch_size)
 
-    shuffled_dict = {}
-    for key, value in data_dict.items():
-        if value is None:
-            shuffled_dict[key] = None
-        elif isinstance(value, torch.Tensor):
-            shuffled_dict[key] = value[permutation]
-        elif isinstance(value, list):
-            shuffled_dict[key] = [value[i] for i in permutation]
-        else:
-            raise TypeError(f"Unsupported type for shuffling: {type(value)}")
-    return shuffled_dict
+    def permute(v: Optional[Sequence]) -> Optional[Sequence]:
+        if v is None:
+            return None
+        if isinstance(v, torch.Tensor):
+            return v[permutation]
+        return [v[i] for i in permutation]
 
-
-def split_data_dict(data_dict: dict[str, Any], num_chunks: int) -> list[dict[str, Any]]:
-    """
-    Splits a dictionary of tensors or lists along the first dimension into `num_chunks` equal parts.
-    """
-    first_item = next(item for item in data_dict.values() if item is not None)
-    # Ensure chunk_size is an integer
-    chunk_size = len(first_item) // num_chunks
-    if len(first_item) % num_chunks != 0:
-        logging.warning(
-            f"The total number of samples ({len(first_item)}) is not divisible by the number of chunks ({num_chunks}). "
-            f"The last {len(first_item) % num_chunks} samples will be dropped."
-        )
-
-    chunked_list = []
-    for i in range(num_chunks):
-        chunk = {}
-        start_idx = i * chunk_size
-        end_idx = (i + 1) * chunk_size
-        for key, value in data_dict.items():
-            if value is None:
-                chunk[key] = None
-            else:
-                chunk[key] = value[start_idx:end_idx]
-        chunked_list.append(chunk)
-    return chunked_list
+    return {key: permute(val) for key, val in seq_dict.items()}
 
 
 def nanmin(tensor: torch.Tensor) -> torch.Tensor:
@@ -284,17 +281,27 @@ class GRPOTrainer(Trainer):
         # Suppress irrelevant warning
         model.warnings_issued["estimate_tokens"] = True
 
-        # Store processing class and ensure pad token
-        self.processing_class = processing_class
+        # Check if the model supports logits_to_keep (some models and VLMs don't)
+        self.model_accepts_logits_to_keep = accepts_logits_to_keep(model)
 
-        # Ensure pad token is set
+        # Handle pad token for processors or tokenizers
         if isinstance(processing_class, ProcessorMixin):
             tokenizer = processing_class.tokenizer
-        else:
+        elif isinstance(processing_class, PreTrainedTokenizerBase):
             tokenizer = processing_class
+        else:
+            raise TypeError("The `processing_class` must be either a `PreTrainedTokenizerBase` or a `ProcessorMixin`")
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+
+        self.pad_token = tokenizer.pad_token
+        self.pad_token_id = tokenizer.pad_token_id
+        self.eos_token_id = tokenizer.eos_token_id
+        self.image_token = getattr(processing_class, "image_token", None)
+        self.image_token_id = getattr(processing_class, "image_token_id", None)
+        self.vision_start_token_id = getattr(model.config, "vision_start_token_id", None)
+        self.vision_end_token_id = getattr(model.config, "vision_end_token_id", None)
 
         # Training arguments
         self.per_device_train_batch_size = args.per_device_train_batch_size
@@ -446,17 +453,15 @@ class GRPOTrainer(Trainer):
                 )
 
         # dummy data collator
-        def default_data_collator(features):
+        def data_collator(features):
             return features
 
         super().__init__(
             model=model,
             args=args,
-            data_collator=default_data_collator,
+            data_collator=data_collator,
             train_dataset=train_dataset,
-            eval_dataset=datasets.Dataset.from_dict(
-                {}
-            ),  # dummy eval ds. This is actually handled by environment
+            eval_dataset=eval_dataset,
             processing_class=processing_class,
             callbacks=callbacks,
             optimizers=optimizers,
@@ -503,7 +508,7 @@ class GRPOTrainer(Trainer):
         elif is_deepspeed_zero3_enabled():
             model_id = model.config._name_or_path
             model_init_kwargs = {"torch_dtype": "auto"}
-            self.ref_model = generic_model_loader(model_id, **model_init_kwargs)
+            self.ref_model = model_loader(model_id, **model_init_kwargs)
         elif is_peft_model(model):
             # If PEFT is used, the reference model is not needed since the adapter can be disabled
             # to revert to the initial model.
@@ -726,18 +731,39 @@ class GRPOTrainer(Trainer):
             self._async_started = False
 
     def _get_last_hidden_state(
-        self, unwrapped_model, input_ids, attention_mask, logits_to_keep=None
+        self, unwrapped_model, input_ids, attention_mask, logits_to_keep, **model_kwargs
     ):
         if is_peft_model(unwrapped_model):
             unwrapped_model = unwrapped_model.base_model.model
+
+        model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+
+        # For Qwen models:
+        if "image_grid_thw" in model_kwargs and "pixel_values" in model_kwargs:
+            model_inputs["image_grid_thw"] = model_kwargs["image_grid_thw"]
+        # For Gemma, SmolVLM2, LLaVa-Next etc.:
+        if "pixel_values" in model_kwargs:
+            model_inputs["pixel_values"] = model_kwargs["pixel_values"]
+        # For SmolVLM2
+        if "pixel_attention_mask" in model_kwargs:
+            model_inputs["pixel_attention_mask"] = model_kwargs["pixel_attention_mask"]
+        # For LLaVa-Next
+        if "image_sizes" in model_kwargs:
+            model_inputs["image_sizes"] = model_kwargs["image_sizes"]
+  
+        # Only add logits_to_keep if the model supports it
+        if self.model_accepts_logits_to_keep:
+            # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
+            model_inputs["logits_to_keep"] = logits_to_keep + 1
+
         last_hidden_state = unwrapped_model.model(
-            input_ids=input_ids, attention_mask=attention_mask
+            **model_inputs
         ).last_hidden_state
         last_hidden_state = last_hidden_state[:, :-1, :]  # (B, L-1, H)
-        if logits_to_keep is not None:
-            last_hidden_state = last_hidden_state[
-                :, -logits_to_keep:, :
-            ]  # (B, logits_to_keep, H)
+        # Only keep the last logits_to_keep. For model that support logits_to_keep, this is a no-op.
+        last_hidden_state = last_hidden_state[
+            :, -logits_to_keep:, :
+        ]  # (B, logits_to_keep, H)
         return last_hidden_state
 
     # Get the per-token log probabilities for the completions for the model and the reference model
@@ -754,56 +780,41 @@ class GRPOTrainer(Trainer):
             0
         )  # Chunk inputs into smaller batches to reduce memory peak
         all_logps = []
-        accepts_logits_to_keep = _accepts_logits_to_keep(model)
+
         for i in range(0, input_ids.size(0), batch_size):
             input_ids_batch = input_ids[i : i + batch_size]
             attention_mask_batch = attention_mask[i : i + batch_size]
-            model_kwargs_batch = {}
-            for key, value in model_kwargs.items():
-                if isinstance(value, list):
-                    # 1. Slice the list to get the tensors for this micro-batch
-                    sub_list = value[i : i + batch_size]
-                    # 2. Batch the tensors in the sub-list together
-                    # Handle different tensor types appropriately
-                    if key == "pixel_values" and len(sub_list) > 0:
-                        # For pixel_values, each item might have different shapes
-                        # Just pass them as a list if they can't be concatenated
-                        if all(
-                            isinstance(item, torch.Tensor)
-                            and item.shape == sub_list[0].shape
-                            for item in sub_list
-                        ):
-                            model_kwargs_batch[key] = torch.stack(sub_list, dim=0).to(
-                                self.accelerator.device
-                            )
-                        else:
-                            # Different shapes, pass as list
-                            model_kwargs_batch[key] = [
-                                item.to(self.accelerator.device) for item in sub_list
-                            ]
-                    else:
-                        # For other tensors, use standard concatenation
-                        model_kwargs_batch[key] = torch.cat(sub_list, dim=0).to(
-                            self.accelerator.device
-                        )
-                else:
-                    # Handle non-list arguments (like the 'logits_to_keep' we added)
-                    model_kwargs_batch[key] = value
-            if accepts_logits_to_keep:
-                model_kwargs_batch["logits_to_keep"] = logits_to_keep + 1
-            # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-            logits = model(
-                input_ids=input_ids_batch,
-                attention_mask=attention_mask_batch,
-                **model_kwargs_batch,
-            ).logits
+
+            model_inputs = {
+                "input_ids": input_ids_batch,
+                "attention_mask": attention_mask_batch,
+            }
+
+            # image_grid_thw, pixel_values, pixel_attention_mask, image_sizes...
+            if "image_grid_thw" in model_kwargs and "pixel_values" in model_kwargs:
+                model_inputs["image_grid_thw"] = model_kwargs["image_grid_thw"][i : i + batch_size]
+                start_pixel_idx = model_kwargs["image_grid_thw"][:i].prod(-1).sum().item()
+                end_pixel_idx = model_kwargs["image_grid_thw"][: i + batch_size].prod(-1).sum().item()
+                model_inputs["pixel_values"] = model_kwargs["pixel_values"][start_pixel_idx:end_pixel_idx]
+            elif "pixel_values" in model_kwargs:
+                model_inputs["pixel_values"] = model_kwargs["pixel_values"][i : i + batch_size]
+            if "pixel_attention_mask" in model_kwargs:
+                model_inputs["pixel_attention_mask"] = model_kwargs["pixel_attention_mask"][i : i + batch_size]
+            if "image_sizes" in model_kwargs:
+                model_inputs["image_sizes"] = model_kwargs["image_sizes"][i : i + batch_size]
+
+            # Only add logits_to_keep if the model supports it
+            if self.model_accepts_logits_to_keep:
+                # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
+                model_inputs["logits_to_keep"] = logits_to_keep + 1
+            
+            logits = model(**model_inputs).logits
             logits = logits[
                 :, :-1, :
             ]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
             input_ids_batch = input_ids_batch[:, -logits_to_keep:]
-            # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
-            # See https://github.com/huggingface/trl/issues/2770
-            logits = logits[:, -logits_to_keep:]
+            # Only keep the last logits_to_keep. For model that support logits_to_keep, this is a no-op.
+            logits = logits[:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
             # Divide logits by sampling temperature.
             # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
             logits = logits / self.temperature
@@ -990,7 +1001,7 @@ class GRPOTrainer(Trainer):
 
         # Gather batch data from all processes
         prompts = [x["prompt"] for x in batch]
-        images = extract_images_from_batch(batch)
+        images = [x.get("images", []) for x in batch] if any("images" in x for x in batch) else None
         answers = [x["answer"] for x in batch]
         tasks = [x.get("task", "default") for x in batch]
         infos = [x.get("info", {}) for x in batch]
@@ -1236,8 +1247,8 @@ class GRPOTrainer(Trainer):
             }
 
             # Shuffle and split for gradient accumulation
-            full_batch = shuffle_data_dict(full_batch)
-            self._buffered_inputs = split_data_dict(
+            full_batch = shuffle_sequence_dict(full_batch)
+            self._buffered_inputs = split_tensor_dict(
                 full_batch, self.gradient_accumulation_steps
             )
             self.accelerator.wait_for_everyone()
@@ -1432,17 +1443,8 @@ class GRPOTrainer(Trainer):
                 if isinstance(msg, dict):
                     role = msg.get("role", "")
                     content = msg.get("content", "")
-                    if isinstance(content, list):
-                        # Extract text from multimodal content
-                        text_content = ""
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                text_content += item.get("text", "")
-                            elif isinstance(item, dict) and item.get("type") == "image_url":
-                                text_content += " [IMAGE]"
-                        text_parts.append(f"{role}: {text_content}")
-                    elif isinstance(content, str):
-                        text_parts.append(f"{role}: {content}")
+                    text_content = extract_text_from_multimodal_content(content)
+                    text_parts.append(f"{role}: {text_content}")
             return "\n".join(text_parts)
         else:
             return str(prompt)
@@ -1570,19 +1572,6 @@ class GRPOTrainer(Trainer):
             ):
                 import pandas as pd
 
-                # format prompt for logging
-                prompt = []
-                if prompts:
-                    for messages in prompts:
-                        if isinstance(messages, str):
-                            # Completion format
-                            prompt.append([{"role": "user", "content": messages}])
-                        else:
-                            # Chat format
-                            last_message = messages[-1]
-                            content = last_message.get("content", "")
-                            content = extract_text_from_multimodal_content(content)
-                            prompt.append([{"role": "user", "content": content}])
                 table_data = {
                     "step": [str(self.state.global_step)] * len(prompts),
                     "prompt": [self._sanitize_multimodal_prompt(p) for p in prompts],

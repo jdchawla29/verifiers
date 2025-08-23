@@ -1,21 +1,40 @@
 import importlib
+import inspect
 from importlib.util import find_spec
 from importlib import import_module
 from typing import Any, Callable
 
 import torch
 import torch.nn as nn
+import transformers
 from transformers import (
-    AutoModelForCausalLM,
-    AutoModel,
     AutoProcessor,
     AutoConfig,
     PreTrainedModel,
 )  # type: ignore
-from transformers.models.auto.modeling_auto import (
-    AutoModelForSeq2SeqLM,
-    AutoModelForVision2Seq,
-)
+
+
+def accepts_logits_to_keep(model: PreTrainedModel) -> bool:
+    """
+    Some models (SmolVLM/Idefics3) don't support `logits_to_keep` argument and error out if we pass it.
+    We inspect the model's forward method to determine this.
+
+    Args:
+        model: The model to check
+        
+    Returns:
+        True if the model accepts logits_to_keep, False otherwise
+    """
+    forward = (
+        model.get_base_model().forward
+        if hasattr(model, "get_base_model")
+        else model.forward
+    )
+    try:
+        inspect.signature(forward).bind_partial(**{"logits_to_keep": None})
+        return True
+    except TypeError:
+        return False
 
 
 class _ForwardRedirection:
@@ -81,36 +100,15 @@ def is_liger_available() -> bool:
     return find_spec("liger_kernel") is not None
 
 
-def generic_model_loader(model_id: str, **model_kwargs) -> PreTrainedModel:
-    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    for arch in cfg.architectures or []:
-        try:
-            cls = getattr(import_module("transformers"), arch)
-            return cls.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                **model_kwargs,
-            )
-        except (AttributeError, ImportError, ValueError):
-            pass
-
-    for auto_cls in (
-        AutoModelForCausalLM,
-        AutoModelForSeq2SeqLM,
-        AutoModelForVision2Seq,
-        AutoModel,
-    ):
-        try:
-            return auto_cls.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                **model_kwargs,
-            )
-        except ValueError:
-            continue
-
-    raise RuntimeError(f"No suitable loader found for model type {cfg.model_type!r}")
-
+def model_loader(model_id: str, **model_kwargs) -> PreTrainedModel:
+    """Load a model using its architecture directly from transformers."""
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    architecture = getattr(transformers, config.architectures[0])
+    return architecture.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+        **model_kwargs
+    )
 
 def get_model(
     model_name: str,
@@ -149,7 +147,7 @@ def get_model(
             patch_func = getattr(ligermod, patch_func_name, None)
             if callable(patch_func):
                 patch_func()
-                model = generic_model_loader(model_name, **model_kwargs)
+                model = model_loader(model_name, **model_kwargs)
                 print(f"Applied Liger-Kernel patch to {model_name}")
                 return model
             else:
@@ -157,10 +155,10 @@ def get_model(
                     f"Model {model_name} may not be supported with Liger-Kernel in verifiers. Check the Liger-Kernel documentation."
                 )
     else:
-        return generic_model_loader(model_name, **model_kwargs)
+        return model_loader(model_name, **model_kwargs)
 
 
-def get_tokenizer(model_name: str, padding_side: str = "left") -> Any:
+def get_processor(model_name: str, padding_side: str = "left") -> Any:
     processor = AutoProcessor.from_pretrained(model_name, padding_side=padding_side)
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     if not hasattr(tokenizer, "chat_template"):
@@ -172,12 +170,16 @@ def get_tokenizer(model_name: str, padding_side: str = "left") -> Any:
     return processor
 
 
-def get_model_and_tokenizer(
+def get_model_and_processor(
     model_name: str,
     use_liger: bool = True,
     liger_patch_suffix: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     model = get_model(model_name, use_liger, liger_patch_suffix, model_kwargs)
-    tokenizer = get_tokenizer(model_name)
-    return model, tokenizer
+    processor = get_processor(model_name)
+    return model, processor
+
+
+# alias
+get_model_and_tokenizer = get_model_and_processor

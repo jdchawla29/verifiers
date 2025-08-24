@@ -22,7 +22,7 @@ The environment uses:
 ## Usage
 
 ```python
-from vf_docvqa import load_environment
+from docvqa import load_environment
 
 env = load_environment(
     num_train_examples=1000,  # -1 for full dataset

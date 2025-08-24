@@ -1,5 +1,5 @@
 [project]
-name = "vf-mmmu"
+name = "mmmu"
 version = "0.1.0"
 description = "MMMU verifiers environment"
 requires-python = ">=3.10"

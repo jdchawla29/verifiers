@@ -16,8 +16,8 @@ import sys
 import verifiers as vf
 
 # Import the environment
-sys.path.append("environments/vf_mmmu")
-from vf_mmmu import load_environment
+sys.path.append("environments/mmmu")
+from mmmu import load_environment
 
 # Set up logging
 logging.basicConfig(
@@ -36,10 +36,16 @@ def main():
         help="Model to train (must match the vLLM server model)",
     )
     parser.add_argument(
-        "--train-samples", type=int, default=-1, help="Number of training samples (-1 for all)"
+        "--train-samples",
+        type=int,
+        default=-1,
+        help="Number of training samples (-1 for all)",
     )
     parser.add_argument(
-        "--eval-samples", type=int, default=-1, help="Number of evaluation samples (-1 for all)"
+        "--eval-samples",
+        type=int,
+        default=-1,
+        help="Number of evaluation samples (-1 for all)",
     )
     args = parser.parse_args()
 

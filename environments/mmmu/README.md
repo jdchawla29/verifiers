@@ -1,4 +1,4 @@
-# VF-MMMU Environment
+# MMMU Environment
 
 Environment for training and evaluating multimodal models on the MMMU benchmark multiple-choice questions.
 
@@ -20,13 +20,13 @@ This environment filters for multiple-choice questions only, where each question
 ## Installation
 
 ```bash
-vf-install vf-mmmu
+vf-install mmmu
 ```
 
 ## Usage
 
 ```python
-from vf_mmmu import load_environment
+from mmmu import load_environment
 
 # Load environment with custom dataset sizes
 vf_env = load_environment(

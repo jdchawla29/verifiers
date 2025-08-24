@@ -16,8 +16,8 @@ import sys
 import verifiers as vf
 
 # Import the environment
-sys.path.append("environments/vf_docvqa")
-from vf_docvqa import load_environment
+sys.path.append("environments/docvqa")
+from docvqa import load_environment
 
 # Set up logging
 logging.basicConfig(
